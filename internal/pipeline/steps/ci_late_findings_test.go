@@ -11,6 +11,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
+	"github.com/kunchenguid/no-mistakes/internal/scm/plugin/fakeplugin"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"os"
 	"path/filepath"
@@ -543,6 +544,129 @@ func TestLateCIAdmissionRefusesMovedOrUnreadableOwnedPublicationWithoutMutation(
 			}
 			if !reflect.DeepEqual(before, after) || !reflect.DeepEqual(beforeSteps, afterSteps) || !reflect.DeepEqual(beforeRounds, afterRounds) || f.localHead(t) != f.headSHA || len(f.sctx.Agent.(*mockAgent).calls) != 0 {
 				t.Fatal("refused publication changed readiness, authority, gate, worktree or fixer")
+			}
+		})
+	}
+}
+
+func TestLateCIRetainedRepairMergeProofUsesPublishedHead(t *testing.T) {
+	for _, retention := range []string{"protected", "timeout"} {
+		for _, proofHead := range []string{"published", "unpublished"} {
+			t.Run(retention+"/"+proofHead, func(t *testing.T) {
+				ag := &mockAgent{name: "test", runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+					if err := os.WriteFile(filepath.Join(opts.CWD, "retained.txt"), []byte("material repair"), 0o644); err != nil {
+						return nil, err
+					}
+					gitCmd(t, opts.CWD, "add", "retained.txt")
+					gitCmd(t, opts.CWD, "commit", "-m", "retained repair")
+					if retention == "timeout" {
+						<-ctx.Done()
+						return nil, ctx.Err()
+					}
+					if err := os.WriteFile(filepath.Join(opts.CWD, "blocked.lock"), []byte("blocked edit"), 0o644); err != nil {
+						return nil, err
+					}
+					return &agent.Result{Output: json.RawMessage(`{"summary":"retained repair","code_change_needed":true}`)}, nil
+				}}
+				f := newLateCIRepairFixture(t, ag)
+				f.sctx.Config.ProtectedPaths = []string{"*.lock"}
+				f.sctx.Config.AgentTimeout = time.Second
+				parked, err := (&CIStep{}).Execute(f.sctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				assertLateCIRequestParked(t, parked)
+				persistCIRefusal(t, f, parked)
+				retained := f.localHead(t)
+				if retained == f.headSHA || f.sctx.Run.HeadSHA != retained {
+					t.Fatal("repair custody was not advanced")
+				}
+				expectedProof := f.headSHA
+				if proofHead == "unpublished" {
+					expectedProof = retained
+				}
+				url := "https://git.example.com/team/repo/pull/42"
+				f.sctx.Run.PRURL = &url
+				if err := f.sctx.DB.UpdateRunPRURL(f.sctx.Run.ID, url); err != nil {
+					t.Fatal(err)
+				}
+				_, logPath := fakeProviderPlugin(t, f.sctx, fakeplugin.State{PRs: []fakeplugin.PR{{Number: "42", URL: url, HeadBranch: "feature", BaseBranch: "main", HeadSHA: expectedProof, State: "merged"}}})
+				f.sctx.PreviousFindings = parked.Findings
+				f.sctx.DeferredFindings = ""
+				resolved, err := (&CIStep{}).ReconcileApprovalGate(f.sctx)
+				if proofHead == "published" {
+					if err != nil || !resolved {
+						t.Fatalf("published merge proof refused retained repair: %v, %v", resolved, err)
+					}
+				} else if err == nil || resolved {
+					t.Fatal("unpublished repair was certified as merged")
+				}
+				outcome, err := (&CIStep{}).Execute(f.sctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if proofHead == "published" {
+					if !outcome.SkipRemaining || outcome.RestartFrom != "" {
+						t.Fatalf("merged publication entered repair: %+v", outcome)
+					}
+					f.sctx.Fixing = false
+					if _, err := (&CIStep{}).Execute(f.sctx); err != nil {
+						t.Fatalf("terminal monitor used unpublished custody for proof: %v", err)
+					}
+				} else {
+					assertLateCIRequestParked(t, outcome)
+				}
+				persisted, err := f.sctx.DB.GetRun(f.sctx.Run.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if persisted.HeadSHA != retained || persisted.LastPushedSHA == nil || *persisted.LastPushedSHA != f.headSHA || f.localHead(t) != retained || f.remoteHead(t) != f.headSHA || len(ag.calls) != 1 {
+					t.Fatal("terminal merge changed unpublished custody or publication")
+				}
+				if proofHead == "published" && (persisted.PRState == nil || *persisted.PRState != "merged") {
+					t.Fatal("published merge did not settle terminal lifecycle")
+				}
+				for _, op := range pluginOperations(t, logPath) {
+					if op == "pr find" || op == "pr create" || op == "pr update" {
+						t.Fatalf("terminal repair entered publication/replacement: %s", op)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestLateCIUnavailablePublicationRefusesAfterValidationRestart(t *testing.T) {
+	for _, mode := range []string{"credentials", "host"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newLateCIRepairFixture(t, &mockAgent{name: "test"})
+			if err := os.WriteFile(filepath.Join(f.dir, "amendment.txt"), []byte("amended requirement"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			gitCmd(t, f.dir, "add", "amendment.txt")
+			gitCmd(t, f.dir, "commit", "-m", "amendment")
+			amended := f.localHead(t)
+			if err := f.sctx.DB.UpdateRunHeadSHAForRevalidation(f.sctx.Run.ID, amended); err != nil {
+				t.Fatal(err)
+			}
+			f.sctx.Run.HeadSHA = amended
+			if err := f.sctx.DB.ResetStepsFrom(f.sctx.Run.ID, 0); err != nil {
+				t.Fatal(err)
+			}
+			recordReviewApproval(t, f.sctx, amended)
+			f.sctx.Fixing = false
+			f.sctx.PreviousFindings, f.sctx.DeferredFindings = "", ""
+			if mode == "credentials" {
+				f.sctx.Env = append(fakeCIGH(t, "OPEN", `[]`), "FAKE_CLI_AUTH_ERR=temporarily unavailable")
+			} else {
+				f.sctx.Repo.UpstreamURL = "https://unsupported.example/test/repo"
+				f.sctx.Run.PRURL = nil
+			}
+			if _, err := (&PushStep{}).Execute(f.sctx); err == nil {
+				t.Fatal("late amendment published with unavailable lifecycle proof")
+			}
+			if f.remoteHead(t) != f.headSHA {
+				t.Fatal("unavailable late publication moved the remote")
 			}
 		})
 	}

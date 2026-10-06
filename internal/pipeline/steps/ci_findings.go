@@ -453,3 +453,32 @@ func ciTerminalRepairOutcome(outcome *pipeline.StepOutcome, selected Findings, d
 	outcome.Findings = string(encoded)
 	return outcome
 }
+
+func runHasLateCIAmendment(sctx *pipeline.StepContext) (bool, error) {
+	steps, err := sctx.DB.GetStepsByRun(sctx.Run.ID)
+	if err != nil {
+		return false, err
+	}
+	for _, step := range steps {
+		if step.StepName != types.StepCI {
+			continue
+		}
+		rounds, err := sctx.DB.GetRoundsByStep(step.ID)
+		if err != nil {
+			return false, err
+		}
+		for _, round := range rounds {
+			if round.FindingsJSON == nil {
+				continue
+			}
+			targets, err := parseCIFixTargets(*round.FindingsJSON)
+			if err != nil {
+				return false, err
+			}
+			if targets.LateFinding {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}

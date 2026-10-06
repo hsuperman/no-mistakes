@@ -855,17 +855,27 @@ func (s *CIStep) publishRepair(sctx *pipeline.StepContext, headSHA string) (ciRe
 // contract violation (which fails the step) from an unsettled write (which
 // parks).
 func attestHeadBeforePush(sctx *pipeline.StepContext, headSHA string, steps []*db.StepResult) error {
+	lateAmendment, err := runHasLateCIAmendment(sctx)
+	if err != nil {
+		return fmt.Errorf("%w: read late amendment history: %w", errAttestationWriteFailed, err)
+	}
 	provider := resolvedProvider(sctx)
 	if !supportsPRTemplates(provider) {
+		if lateAmendment {
+			return fmt.Errorf("%w: cannot verify late amendment PR provider", errAttestationWriteFailed)
+		}
 		return nil
 	}
 	branch := strings.TrimPrefix(sctx.Run.Branch, "refs/heads/")
 	if branch == effectivePRBaseBranch(sctx) {
+		if lateAmendment {
+			return fmt.Errorf("%w: late amendment branch is the PR base", errAttestationWriteFailed)
+		}
 		return nil
 	}
 	host, reason := buildHost(sctx, provider)
 	if host == nil {
-		if runPRURL(sctx) != "" {
+		if lateAmendment {
 			return fmt.Errorf("%w: cannot verify owned PR: %s", errAttestationWriteFailed, reason)
 		}
 		if sctx.Log != nil && strings.TrimSpace(reason) != "" {
@@ -874,7 +884,7 @@ func attestHeadBeforePush(sctx *pipeline.StepContext, headSHA string, steps []*d
 		return nil
 	}
 	if err := host.Available(sctx.Ctx); err != nil {
-		if pluginContractBroken(err) || runPRURL(sctx) != "" {
+		if pluginContractBroken(err) || lateAmendment {
 			return fmt.Errorf("%w: %w", errAttestationWriteFailed, err)
 		}
 		if sctx.Log != nil {

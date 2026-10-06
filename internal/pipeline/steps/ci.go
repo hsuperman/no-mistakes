@@ -169,7 +169,7 @@ func (s *CIStep) ReconcileApprovalGate(sctx *pipeline.StepContext) (bool, error)
 	}
 	switch state {
 	case scm.PRStateMerged:
-		if err := verifyMergedProof(sctx.Ctx, host, &scm.PR{Number: prNumber, URL: prURL}, sctx.Run.HeadSHA); err != nil {
+		if err := verifyRunMergedProof(sctx, host, &scm.PR{Number: prNumber, URL: prURL}); err != nil {
 			return false, err
 		}
 		if err := sctx.DB.UpdateRunPRState(sctx.Run.ID, "merged"); err != nil {
@@ -247,6 +247,29 @@ func (s *CIStep) VerifyApprovalOverride(sctx *pipeline.StepContext) (string, err
 		return fmt.Sprintf("live checks for %s: no checks reported", prURL), nil
 	}
 	return fmt.Sprintf("live checks for %s not all passed: %s", prURL, strings.Join(unresolvedCheckNames(checks), ", ")), nil
+}
+
+func verifyRunMergedProof(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR) error {
+	if !host.Capabilities().MergedProof {
+		return nil
+	}
+	run, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		return err
+	}
+	expected := sctx.Run.HeadSHA
+	if run != nil && run.LastPushedSHA != nil && strings.TrimSpace(*run.LastPushedSHA) != "" {
+		expected = *run.LastPushedSHA
+	} else {
+		late, err := runHasLateCIAmendment(sctx)
+		if err != nil {
+			return err
+		}
+		if late {
+			return fmt.Errorf("late amendment has no durable published head for merge proof")
+		}
+	}
+	return verifyMergedProof(sctx.Ctx, host, pr, expected)
 }
 
 func verifyMergedProof(ctx context.Context, host scm.Host, pr *scm.PR, expectedHead string) error {
@@ -563,7 +586,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			sctx.Log(fmt.Sprintf("warning: could not check PR state: %v", err))
 			prStateKnown = false
 		} else if state == scm.PRStateMerged {
-			if err := verifyMergedProof(ctx, host, pr, sctx.Run.HeadSHA); err != nil {
+			if err := verifyRunMergedProof(sctx, host, pr); err != nil {
 				return nil, err
 			}
 			if err := sctx.DB.UpdateRunPRState(sctx.Run.ID, "merged"); err != nil {
