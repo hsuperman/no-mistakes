@@ -191,8 +191,12 @@ func recoveryRefCompatible(ctx context.Context, dir, ref, head string) (bool, er
 // ordinary Recover containment proof. No push, rerun or validation is implied.
 func (s *Service) AdoptReviewedRecovery(ctx context.Context, request ReviewedRecoveryRequest, consent string) State {
 	state, run, _ := s.inspect(ctx)
+	initialHead := state.Local.Head
+	materializedChanged := false
 	refuse := func(err error) State {
-		return blockedPlan(state, state.State, "blocked_reviewed_recovery", err.Error())
+		result := blockedPlan(state, state.State, "blocked_reviewed_recovery", err.Error())
+		result.Changed = materializedChanged
+		return result
 	}
 	plan, err := s.PreviewReviewedRecovery(ctx, request)
 	if err != nil {
@@ -224,7 +228,7 @@ func (s *Service) AdoptReviewedRecovery(ctx context.Context, request ReviewedRec
 	}
 	return s.recoverMovePreserved(ctx, run, state, request.ReviewedHead, true, func() bool { return validate(request.ExpectedLocalHead) }, func() State {
 		state, _, _ = s.inspect(ctx)
-		state.Changed = state.Local.Head != request.ExpectedLocalHead
+		materializedChanged = state.Local.Head != initialHead
 		if !validate(request.ReviewedHead) {
 			return refuse(fmt.Errorf("reviewed head materialized but evidence changed; preserved refs remain, custody was not returned"))
 		}
@@ -233,7 +237,7 @@ func (s *Service) AdoptReviewedRecovery(ctx context.Context, request ReviewedRec
 			return refuse(fmt.Errorf("reviewed head materialized but conditional custody stamp refused; preserved refs remain, inspect before retrying"))
 		}
 		result, _, _ := s.inspect(ctx)
-		result.Changed, result.Recovered = true, true
+		result.Changed, result.Recovered = materializedChanged, true
 		return result
 	})
 }

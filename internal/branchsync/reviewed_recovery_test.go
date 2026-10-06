@@ -223,11 +223,35 @@ func TestReviewedRecoveryLateRunMutationLeavesMaterializedHeadWithoutCustody(t *
 		}
 	}
 	got := f.service.AdoptReviewedRecovery(f.ctx, request, plan.Digest)
-	if got.Recovered || f.custodyReturned() || !strings.Contains(got.Error, "materialized") {
+	if got.Recovered || !got.Changed || f.custodyReturned() || got.Local.Head != request.ReviewedHead || !strings.Contains(got.Error, "materialized") {
 		t.Fatalf("false success: %#v", got)
 	}
 	if mustRun(t, f.local, "rev-parse", "HEAD") != request.ReviewedHead {
 		t.Fatal("unexpected rollback of materialized result")
+	}
+}
+
+func TestReviewedRecoveryAlreadyAtReviewedHeadReportsNoHeadChange(t *testing.T) {
+	t.Parallel()
+	f, request := newReviewedRecoveryFixture(t)
+	// The reviewed final head is itself the recorded published commit. The
+	// explicit custody action may still be meaningful, but materialization is
+	// a no-op and must not claim a branch-head change.
+	if err := f.db.UpdateRunPushBinding(f.run.ID, db.PushBinding{HeadSHA: f.preserved, TargetKind: "upstream", TargetFingerprint: TargetFingerprint(f.remote), Ref: "refs/heads/feature/recover"}); err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, f.local, "fetch", f.gate, f.preserved)
+	mustRun(t, f.local, "checkout", "--detach", f.preserved)
+	mustRun(t, f.local, "branch", "-f", f.run.Branch, f.preserved)
+	mustRun(t, f.local, "checkout", f.run.Branch)
+	request.ExpectedLocalHead = f.preserved
+	plan, err := f.service.PreviewReviewedRecovery(f.ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := f.service.AdoptReviewedRecovery(f.ctx, request, plan.Digest)
+	if !got.Recovered || got.Changed || !f.custodyReturned() || got.Local.Head != f.preserved {
+		t.Fatalf("no-op custody receipt: %#v", got)
 	}
 }
 
