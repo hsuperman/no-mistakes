@@ -297,3 +297,15 @@ Everything lives under `~/.no-mistakes/` by default. Set `NM_HOME` to relocate i
 
 New repo IDs are the first 6 bytes (12 hex chars) of `sha256(absolute_working_path)`.
 When an initialized working repo is renamed or moved, `init` preserves the existing repo ID instead of deriving a new one from the new path.
+
+## Explicit adoption of a reviewed terminal rewrite
+
+Ordinary `sync --recover` still refuses a divergent preserved head unless it proves every local change survives. A reviewed rebase may deliberately change those lines; review authority does not turn that rewrite into a containment proof.
+
+An operator who intends to adopt that exact rewrite can preview it with `no-mistakes axi sync --adopt-reviewed-head <R> --run <run> --expected-local-head <S-or-P>` (also available under `sync`). The preview opens existing state read-only, contacts no remote and changes no refs. It displays the canonical caller and common directory, repository, branch, submitted and published commits, exact reviewed head and recovery anchor, gate head, source and target trees, complete binary diff and consent digest. Proofs larger than 4 MiB refuse rather than displaying a truncated diff.
+
+The run must be the latest run for that lane, terminal with no active run or push, and its durable full-review head must equal its verified terminal head exactly. The caller must be completely clean at the exact submitted or published commit. Its gate must already retain a nonsymbolic run-specific recovery anchor at that reviewed commit; missing, conflicting, symbolic or replacement-object evidence refuses.
+
+After inspecting the whole preview, the operator can repeat the same command with `--consent <digest>`. Neither ordinary recovery nor `--yes` supplies that consent. The service re-derives the exact preview and rechecks mutable evidence before preservation, before the guarded branch move and before conditional custody stamping. It keeps the reviewed and original caller commits at `refs/no-mistakes/recover/<run>` and `refs/no-mistakes/recover-local/<run>`, and preserves submitted/published commits at `refs/no-mistakes/recover-submitted/<run>` and `refs/no-mistakes/recover-published/<run>` when present. Existing conflicting anchors refuse.
+
+Materialization uses the existing branch CAS and fail-closed `read-tree` update. Concurrent changes refuse without overwriting those edits. A partially materialized result never reports recovery success: preservation refs remain, custody is not stamped and the operator must inspect the reported state. This operation does not push, restart validation, skip checks, select an arbitrary unreviewed commit or authorize an operational release.
