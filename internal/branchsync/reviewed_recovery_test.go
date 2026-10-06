@@ -138,6 +138,7 @@ func TestReviewedRecoveryRefusesStaleOrUnauthorizedPlansWithoutMovingCaller(t *t
 	t.Parallel()
 	for _, name := range []string{"wrong run", "wrong local", "wrong review", "wrong repository", "wrong branch", "dirty", "untracked", "missing anchor", "symbolic anchor", "unreviewed", "active", "newer terminal", "active race", "caller race", "review race", "anchor race", "gate race", "wrong digest"} {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			f, request := newReviewedRecoveryFixture(t)
 			plan, err := f.service.PreviewReviewedRecovery(f.ctx, request)
 			if err != nil {
