@@ -287,8 +287,17 @@ no-mistakes axi respond --action skip
 | `--instructions` | `string` | (none)        | Guidance applied to selected findings with `--action fix`            |
 | `--reason`       | `string` | (none)        | Operator's exception explanation for Test approval only              |
 | `--add-finding`  | `string` | (none)        | JSON finding object to add and fix                                   |
+| `--head`         | `string` | (none)        | Exact published pipeline head for a new finding during CI monitoring |
 | `-y`, `--yes`    | `bool`   | `false`       | Auto-resolve subsequent eligible gates until a decision point or outcome |
 | `--wait`         | `duration` | `8m`        | Maximum time for pre-drive reads and post-response driving before the caller must reattach |
+
+A new requirement or finding discovered while CI is monitoring can enter the existing run with an exact head binding:
+
+```sh
+no-mistakes axi respond --step ci --action fix --head <full-pipeline-head-sha> --add-finding '{"description":"...","action":"auto-fix"}'
+```
+
+Use the active run's published head from `axi status`. This path requires an open PR, a running CI monitoring round and the same head in the managed worktree and publication record. It refuses stale heads, existing fix rounds and concurrent amendments. Admission retains a recovery gate, revokes CI readiness and review authority, and joins the old monitor before starting the selected repair. Changed bytes return through Review and subsequent validation before Push and CI, even when ordinary CI repairs allow publication without revalidation. Run, PR and publication custody stay with the existing pipeline. An interrupted handoff leaves the finding retained for inspection and recovery. Older daemons refuse this separate IPC method; upgrade through the ordinary tool release process before using it.
 
 For an explicitly authorized Test exception, use `no-mistakes axi respond --step test --action approve --reason "the operator's explanation"`.
 The reason is optional: approval without one remains effective, and a qualifying exception is reported with no operator reason supplied.

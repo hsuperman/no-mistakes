@@ -66,7 +66,9 @@ type Executor struct {
 	approvalCh             chan approvalResponse // buffered channel for approval responses
 	waiting                bool                  // true when blocked on approval
 	waitingStep            types.StepName        // which step is currently awaiting approval
-	waitingApprovalRefusal string                // non-empty: why Approve is rejected at the waiting gate
+	lateCI                 *lateCIMonitor
+	lateCIHandoff          *lateCIMonitor
+	waitingApprovalRefusal string // non-empty: why Approve is rejected at the waiting gate
 
 	gateReconcileInterval time.Duration
 	gateReconcileTimeout  time.Duration
@@ -882,6 +884,9 @@ func (e *Executor) autoFixLimit(stepName types.StepName) int {
 // and any execution error.
 func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult, run *db.Run, repo *db.Repo, workDir, logDir string, state stepExecutionState) (bool, types.StepName, error) {
 	stepName := step.Name()
+	if stepName == types.StepCI {
+		defer e.finishLateCIHandoff(fmt.Errorf("late finding retained; CI handoff did not start a repair; inspect axi status"))
+	}
 	logPath := filepath.Join(logDir, string(stepName)+".log")
 	finalExitCode := 0
 	autoFixLimit := e.autoFixLimit(stepName)
@@ -1141,7 +1146,7 @@ rounds:
 	for {
 		reviewStartingHeadSHA := run.HeadSHA
 		sctx.ReviewStartingHeadSHA = reviewStartingHeadSHA
-		outcome, err := step.Execute(sctx)
+		outcome, err := e.executeInterruptibleCI(step, sctx, sr)
 		if refusal := ProtectedPathOutcome(err); refusal != nil {
 			outcome, err = refusal, nil
 		}
@@ -1338,7 +1343,7 @@ rounds:
 			// emitting events, so that callers who poll the DB status can
 			// immediately call Respond once they see it.
 			e.mu.Lock()
-			e.waiting = true
+			e.waiting = e.lateCIHandoff == nil
 			e.waitingStep = stepName
 			e.waitingApprovalRefusal = approvalRefusal(stepName, effectiveFindings)
 			e.mu.Unlock()
@@ -1465,6 +1470,9 @@ rounds:
 				}
 				e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFixing), "", "", nil)
 				slog.Info("step fix requested, re-executing", "step", stepName)
+				if stepName == types.StepCI {
+					e.finishLateCIHandoff(nil)
+				}
 				continue rounds
 
 			case types.ActionAnswer:
