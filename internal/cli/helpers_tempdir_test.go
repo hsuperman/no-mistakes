@@ -44,8 +44,16 @@ func socketSafeTempBase(tempDir, goos string) string {
 }
 
 func TestSocketSafeTempBaseUsesShortConfiguredTempDir(t *testing.T) {
-	base := ownedTempDir(t, "st-")
-	got := socketSafeTempBase(base, "linux")
+	if runtime.GOOS == "windows" {
+		configured := os.TempDir()
+		if got := socketSafeTempBase(configured, runtime.GOOS); got != configured {
+			t.Fatalf("Windows temp base = %q, want unchanged %q", got, configured)
+		}
+		return
+	}
+
+	base := shortUnixSocketTempBase()
+	got := socketSafeTempBase(base, runtime.GOOS)
 	want, err := filepath.EvalSymlinks(base)
 	if err != nil {
 		t.Fatal(err)
@@ -56,7 +64,15 @@ func TestSocketSafeTempBaseUsesShortConfiguredTempDir(t *testing.T) {
 }
 
 func TestSocketSafeTempBaseFallsBackForLongAndMultibytePaths(t *testing.T) {
-	base := ownedTempDir(t, "lg-")
+	if runtime.GOOS == "windows" {
+		configured := os.TempDir()
+		if got := socketSafeTempBase(configured, runtime.GOOS); got != configured {
+			t.Fatalf("Windows temp base = %q, want unchanged %q", got, configured)
+		}
+		return
+	}
+
+	base := ownedTempDirAt(t, shortUnixSocketTempBase(), "lg-")
 
 	longBase := filepath.Join(base, strings.Repeat("x", 80))
 	if err := os.MkdirAll(longBase, 0o700); err != nil {
@@ -66,12 +82,22 @@ func TestSocketSafeTempBaseFallsBackForLongAndMultibytePaths(t *testing.T) {
 		t.Fatalf("long path base = %q, want /tmp fallback", got)
 	}
 
-	unicodeBase := filepath.Join(base, strings.Repeat("界", 12))
+	unicodeBase := ownedTempDirAt(t, shortUnixSocketTempBase(), "mu-")
+	var probe string
+	for {
+		root := filepath.Join(unicodeBase, testNMHomePrefix+maxMkdirTempSuffix)
+		probe = paths.WithRoot(root).Socket()
+		if len([]byte(probe)) >= unixSocketPathSafeLimit {
+			break
+		}
+		if len([]rune(probe)) >= unixSocketPathSafeLimit {
+			t.Fatalf("cannot construct a multibyte test path below %d runes", unixSocketPathSafeLimit)
+		}
+		unicodeBase = filepath.Join(unicodeBase, "界")
+	}
 	if err := os.MkdirAll(unicodeBase, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	root := filepath.Join(unicodeBase, testNMHomePrefix+maxMkdirTempSuffix)
-	probe := paths.WithRoot(root).Socket()
 	if runeCount := len([]rune(probe)); runeCount >= unixSocketPathSafeLimit {
 		t.Fatalf("test path setup has %d runes; want fewer than %d", runeCount, unixSocketPathSafeLimit)
 	}
@@ -91,7 +117,7 @@ func TestSocketSafeTempBasePreservesWindowsTempDir(t *testing.T) {
 }
 
 func TestShortConfiguredTempDirAllowsOrdinaryDaemonSocket(t *testing.T) {
-	configured := ownedTempDir(t, "sock-")
+	configured := socketSafeTempBase(os.TempDir(), runtime.GOOS)
 	t.Setenv("TMPDIR", configured)
 	base := socketSafeTempBase(os.TempDir(), runtime.GOOS)
 	root, err := os.MkdirTemp(base, "nmh-")
@@ -118,10 +144,20 @@ func TestShortConfiguredTempDirAllowsOrdinaryDaemonSocket(t *testing.T) {
 	}
 }
 
-func ownedTempDir(t *testing.T, pattern string) string {
+func shortUnixSocketTempBase() string {
+	base := socketSafeTempBase(os.TempDir(), runtime.GOOS)
+	probeRoot := filepath.Join(base, "mu-"+maxMkdirTempSuffix, testNMHomePrefix+maxMkdirTempSuffix)
+	probe := paths.WithRoot(probeRoot).Socket()
+	if len([]byte(probe)) > unixSocketPathSafeLimit-10 || len([]rune(probe)) > unixSocketPathSafeLimit-10 {
+		return socketSafeTempBase("/tmp", "linux")
+	}
+	return base
+}
+
+func ownedTempDirAt(t *testing.T, base, pattern string) string {
 	t.Helper()
 
-	dir, err := os.MkdirTemp(os.TempDir(), pattern)
+	dir, err := os.MkdirTemp(base, pattern)
 	if err != nil {
 		t.Fatal(err)
 	}
