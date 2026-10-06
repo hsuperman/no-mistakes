@@ -102,6 +102,38 @@ func TestReviewedRecoveryAdoptsFromExactPublishedCaller(t *testing.T) {
 	}
 }
 
+func TestReviewedRecoveryRetiredPRKeepsCustodyWithoutOfferingPipeline(t *testing.T) {
+	t.Parallel()
+	for _, prState := range []string{"closed", "merged"} {
+		t.Run(prState, func(t *testing.T) {
+			f, request := newReviewedRecoveryFixture(t)
+			if err := f.db.UpdateRunPRState(f.run.ID, prState); err != nil {
+				t.Fatal(err)
+			}
+			plan, err := f.service.PreviewReviewedRecovery(f.ctx, request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := f.service.AdoptReviewedRecovery(f.ctx, request, plan.Digest)
+			if !got.Recovered || !got.Changed || !f.custodyReturned() || got.Local.Head != request.ReviewedHead || mustRun(t, f.local, "rev-parse", "HEAD") != request.ReviewedHead {
+				t.Fatalf("adoption: %#v", got)
+			}
+			for _, binding := range reviewedRecoveryAnchors(f.run, request.ExpectedLocalHead) {
+				if !exactRawCommitRef(f.ctx, f.local, binding.ref, binding.head) {
+					t.Fatalf("lost preserved commit: %#v", binding)
+				}
+			}
+			wantState := StateClosed
+			if prState == "merged" {
+				wantState = StateMergedRemoteRetained
+			}
+			if got.State != wantState || got.Safety != "blocked_"+prState || got.PRState != prState || got.NextAction != nil {
+				t.Fatalf("retired PR offered follow-up work: %#v", got)
+			}
+		})
+	}
+}
+
 func TestReviewedRecoveryRefusesStaleOrUnauthorizedPlansWithoutMovingCaller(t *testing.T) {
 	t.Parallel()
 	for _, name := range []string{"wrong run", "wrong local", "wrong review", "wrong repository", "wrong branch", "dirty", "untracked", "missing anchor", "symbolic anchor", "unreviewed", "active", "newer terminal", "active race", "caller race", "review race", "anchor race", "gate race", "wrong digest"} {

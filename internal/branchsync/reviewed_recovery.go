@@ -187,6 +187,18 @@ func (s *Service) observeReviewedRecovery(ctx context.Context, runID string) (St
 	state.Target.Remote = s.remoteName(ctx)
 	state.Remote = RemoteState{ObservedHead: ptr(run.LastPushedSHA), Freshness: "pipeline_push", ObservedAt: value(run.LastPushedAt)}
 	if run.CustodyReturnedAt != nil {
+		// Match inspection's retired-PR precedence only for a complete push
+		// binding; unpublished recovery still reports returned custody.
+		if run.LastPushedSHA != nil && run.PushTargetFingerprint != nil && run.PushRef != nil && run.PushGeneration != nil && run.SubmittedHeadSHA != nil {
+			switch state.PRState {
+			case "merged":
+				state.State, state.Safety = StateMergedRemoteRetained, "blocked_merged"
+				return state, run, nil
+			case "closed":
+				state.State, state.Safety = StateClosed, "blocked_closed"
+				return state, run, nil
+			}
+		}
 		s.classifyCustodyReturned(ctx, &state)
 	}
 	return state, run, nil
