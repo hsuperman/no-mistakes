@@ -689,14 +689,14 @@ func ciRepairPolicyDescription(sctx *pipeline.StepContext) string {
 
 // recordRepair binds a freshly produced CI repair commit to the run.
 //
-// One uniform rule decides how, and it applies to every CI-fix path - automatic
-// and manual alike, CI failure and merge conflict alike:
+// Ordinary CI repairs use the same rule on automatic and manual paths,
+// including CI failures and merge conflicts:
 //
 //	A repair is published without revalidating only when its continuity with the
 //	reviewed, published head can be PROVEN. When that continuity cannot be
 //	proven, the repair revalidates from Review.
 //
-// ci.revalidate_repairs governs intent identically on every path: true asks for
+// ci.revalidate_repairs governs ordinary repairs: true asks for
 // revalidation outright, false asks to publish when it is safe to do so. Merge
 // conflict repairs are not carved out - they simply always land in the
 // cannot-be-proven half, because a rebase makes the repaired head a
@@ -706,6 +706,10 @@ func ciRepairPolicyDescription(sctx *pipeline.StepContext) string {
 // either: the repair that deleted a reviewed commit in the reproduction behind
 // this rule was authored by the CI repair agent itself. Who wrote the repair
 // says nothing about what it did to the reviewed commits.
+//
+// Late amendments instead compare trees against durable LastPushedSHA and
+// hold material repairs for Review regardless of the ordinary policy. A local
+// custody checkpoint cannot replace that published baseline.
 //
 // Once recording or publication succeeds, the run's recorded head advances;
 // the two paths differ in whether the repair is published now or held until

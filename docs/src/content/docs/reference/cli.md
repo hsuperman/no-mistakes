@@ -284,7 +284,7 @@ no-mistakes axi respond --action skip
 | `--action`       | `string` | (none)        | `approve`, `fix`, or `skip`; required. A reviewer's open question is answered with [`axi answer`](#no-mistakes-axi-answer), not here |
 | `--step`         | `string` | awaiting step | Step to respond to                                                   |
 | `--findings`     | `string` | (none)        | Comma-separated finding IDs for `--action fix`                       |
-| `--instructions` | `string` | (none)        | Guidance applied to selected findings with `--action fix`            |
+| `--instructions` | `string` | (none)        | Guidance for selected findings, or the added finding with `--head`            |
 | `--reason`       | `string` | (none)        | Operator's exception explanation for Test approval only              |
 | `--add-finding`  | `string` | (none)        | JSON finding object to add and fix                                   |
 | `--head`         | `string` | (none)        | Exact published pipeline head for a new finding during CI monitoring |
@@ -297,7 +297,7 @@ A new requirement or finding discovered while CI is monitoring can enter the exi
 no-mistakes axi respond --step ci --action fix --head <full-pipeline-head-sha> --add-finding '{"description":"...","action":"auto-fix"}'
 ```
 
-Use the active run's published head from `axi status`. This path requires an open PR, a fresh CI monitoring execution after validation and publication, outside a fix execution, and the same head in the managed worktree and publication record. A later head that completes full revalidation and publication in the same run can receive another amendment in its fresh non-fix CI execution. It refuses stale heads, active fix executions and concurrent amendments. A monitor resumed inside an ordinary CI fix round after publication remains outside this path, even when its status reads `running`; it refuses safely. Admission retains a recovery gate, revokes CI readiness and review authority, and joins the old monitor before starting the selected repair. Changed bytes return through Review and subsequent validation before Push and CI, even when ordinary CI repairs allow publication without revalidation. Run, PR and publication custody stay with the existing pipeline. An interrupted handoff leaves the finding retained for inspection and recovery. Older daemons refuse this separate IPC method; upgrade through the ordinary tool release process before using it.
+Use the full published pipeline head from `axi status`. Supply `--step ci`, `--action fix`, and `--add-finding`; existing finding IDs and an approval reason are refused with `--head`. Optional `--instructions` is attached to the added finding, preserving its explicit ID and guidance for recovery. The [CI step reference](/no-mistakes/reference/pipeline-steps/#ci) owns eligibility, safe refusal, recovery, and repair behavior. Older daemons refuse the separate amendment method; do not fall back to ordinary `respond` to bypass head binding.
 
 For an explicitly authorized Test exception, use `no-mistakes axi respond --step test --action approve --reason "the operator's explanation"`.
 The reason is optional: approval without one remains effective, and a qualifying exception is reported with no operator reason supplied.
