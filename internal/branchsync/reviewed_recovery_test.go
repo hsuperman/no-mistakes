@@ -449,6 +449,41 @@ func TestReviewedRecoveryRequiresEveryPreservedAnchorThroughStamping(t *testing.
 	}
 }
 
+func TestReviewedRecoveryPostCASDetachedHeadReportsActualState(t *testing.T) {
+	t.Parallel()
+	f, request := newReviewedRecoveryFixture(t)
+	plan, err := f.service.PreviewReviewedRecovery(f.ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalContent, err := os.ReadFile(filepath.Join(f.local, "file.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.service.afterRecoverBranchMove = func() {
+		mustRun(t, f.local, "checkout", "--detach", request.ReviewedHead)
+	}
+	got := f.service.AdoptReviewedRecovery(f.ctx, request, plan.Digest)
+	if got.Recovered || f.custodyReturned() || !got.Changed || got.Local.Head != request.ReviewedHead || got.Local.Branch != "HEAD" || got.Local.Clean || got.Local.Reason != "dirty" || got.Safety != "blocked_recover_assumptions_changed" {
+		t.Fatalf("dishonest detached outcome: %#v", got)
+	}
+	if mustRun(t, f.local, "rev-parse", "HEAD") != request.ReviewedHead || mustRun(t, f.local, "rev-parse", "--abbrev-ref", "HEAD") != "HEAD" {
+		t.Fatal("changed concurrent detached HEAD")
+	}
+	if mustRun(t, f.local, "rev-parse", "refs/heads/"+f.run.Branch) != request.ExpectedLocalHead {
+		t.Fatal("branch rollback did not restore the original head")
+	}
+	content, err := os.ReadFile(filepath.Join(f.local, "file.txt"))
+	if err != nil || string(content) != string(originalContent) {
+		t.Fatalf("overwrote the unmaterialized worktree: %q %v", content, err)
+	}
+	for _, binding := range reviewedRecoveryAnchors(f.run, request.ExpectedLocalHead) {
+		if !exactRawCommitRef(f.ctx, f.local, binding.ref, binding.head) {
+			t.Fatalf("lost preservation anchor: %#v", binding)
+		}
+	}
+}
+
 func TestReviewedRecoveryFailedMaterializationReportsConcurrentHead(t *testing.T) {
 	t.Parallel()
 	f, request := newReviewedRecoveryFixture(t)

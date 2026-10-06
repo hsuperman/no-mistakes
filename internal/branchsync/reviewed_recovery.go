@@ -251,9 +251,12 @@ func (s *Service) AdoptReviewedRecovery(ctx context.Context, request ReviewedRec
 		return result
 	})
 	if !result.Recovered {
-		fresh, _, _ := s.inspect(ctx)
-		result.Local = fresh.Local
-		result.Changed = fresh.Local.Head != initialHead
+		// Observe independently of admission: a concurrent detached HEAD must
+		// still be reported even though it cannot qualify for recovery.
+		result.Local.Head, _ = git.HeadSHA(ctx, s.workDir())
+		result.Local.Branch, _ = git.CurrentBranch(ctx, s.workDir())
+		result.Local.Clean, result.Local.Reason = worktreeClean(ctx, s.workDir())
+		result.Changed = result.Local.Head != initialHead
 	}
 	return result
 }
