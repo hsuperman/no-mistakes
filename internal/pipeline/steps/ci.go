@@ -121,6 +121,13 @@ func (s *CIStep) VerifyLateCIAdmission(sctx *pipeline.StepContext) error {
 	if state != scm.PRStateOpen {
 		return fmt.Errorf("owned PR is not open: %s", state)
 	}
+	published, err := publishedBranchHead(sctx)
+	if err != nil {
+		return fmt.Errorf("verify late CI published head: %w", err)
+	}
+	if published != sctx.Run.HeadSHA {
+		return fmt.Errorf("late CI finding head does not match the owned publication")
+	}
 	return nil
 }
 

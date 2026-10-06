@@ -2,10 +2,10 @@ package pipeline
 
 import (
 	"context"
- "encoding/json"
- "reflect"
+	"encoding/json"
 	"fmt"
 	"os/exec"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -128,8 +128,13 @@ func TestExecutorLateCIFindingJoinsMonitorAndRevalidatesSameRun(t *testing.T) {
 			}
 			ci.refusal = ""
 			response := make(chan error, 1)
+			instructions := map[string]string{"late-1": "preserve parser behavior"}
+			if terminal == "" {
+				finding[0].UserInstructions = "preserve parser behavior"
+				instructions = nil
+			}
 			go func() {
-				response <- executor.RespondToLateCIFinding(run.ID, types.StepCI, types.ActionFix, nil, map[string]string{"late-1": "preserve parser behavior"}, finding, "", head)
+				response <- executor.RespondToLateCIFinding(run.ID, types.StepCI, types.ActionFix, nil, instructions, finding, "", head)
 			}()
 			select {
 			case <-cancelled:
@@ -145,12 +150,20 @@ func TestExecutorLateCIFindingJoinsMonitorAndRevalidatesSameRun(t *testing.T) {
 			}
 			results, _ := database.GetStepsByRun(run.ID)
 			for _, result := range results {
-				if result.StepName != types.StepCI { continue }
+				if result.StepName != types.StepCI {
+					continue
+				}
 				rounds, _ := database.GetRoundsByStep(result.ID)
 				var retained types.Findings
-				if len(rounds) == 0 || rounds[len(rounds)-1].FindingsJSON == nil { t.Fatal("missing durable finding") }
-				if err := json.Unmarshal([]byte(*rounds[len(rounds)-1].FindingsJSON), &retained); err != nil { t.Fatal(err) }
-				if len(retained.Items) != 1 || retained.Items[0].UserInstructions != "preserve parser behavior" { t.Fatalf("instructions lost: %+v", retained) }
+				if len(rounds) == 0 || rounds[len(rounds)-1].FindingsJSON == nil {
+					t.Fatal("missing durable finding")
+				}
+				if err := json.Unmarshal([]byte(*rounds[len(rounds)-1].FindingsJSON), &retained); err != nil {
+					t.Fatal(err)
+				}
+				if len(retained.Items) != 1 || retained.Items[0].ID != "late-1" || retained.Items[0].UserInstructions != "preserve parser behavior" {
+					t.Fatalf("instructions lost: %+v", retained)
+				}
 			}
 			if during.CIReadyAt != nil || during.ReviewApprovedHeadSHA != nil {
 				t.Fatal("admission retained readiness/approval")
@@ -305,6 +318,8 @@ type lateAdmissionTestStep struct {
 }
 
 func (s *lateAdmissionTestStep) VerifyLateCIAdmission(*StepContext) error {
-	if s.refusal != "" { return fmt.Errorf("owned PR: %s", s.refusal) }
+	if s.refusal != "" {
+		return fmt.Errorf("owned PR: %s", s.refusal)
+	}
 	return nil
 }

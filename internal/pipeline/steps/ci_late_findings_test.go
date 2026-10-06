@@ -8,11 +8,13 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -431,6 +433,116 @@ func TestLateCIRepairTimeoutRetainedCommitRevalidates(t *testing.T) {
 			}
 			if calls != 2 || f.localHead(t) != retained || f.remoteHead(t) != f.headSHA {
 				t.Fatal("retained timeout repair was changed or published")
+			}
+		})
+	}
+}
+
+type latePublicationAdmissionStep struct {
+	env     []string
+	started chan struct{}
+}
+
+func (s *latePublicationAdmissionStep) Name() types.StepName { return types.StepCI }
+func (s *latePublicationAdmissionStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
+	if err := sctx.DB.SetRunCIReady(sctx.Run.ID, true); err != nil {
+		return nil, err
+	}
+	close(s.started)
+	<-sctx.Ctx.Done()
+	return nil, sctx.Ctx.Err()
+}
+func (s *latePublicationAdmissionStep) VerifyLateCIAdmission(sctx *pipeline.StepContext) error {
+	sctx.Env = s.env
+	return (&CIStep{}).VerifyLateCIAdmission(sctx)
+}
+
+func TestLateCIAdmissionRefusesMovedOrUnreadableOwnedPublicationWithoutMutation(t *testing.T) {
+	for _, mode := range []string{"advanced", "missing", "unreadable", "advanced-fork"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newCIRepairFixture(t, false, nil)
+			if err := f.sctx.DB.UpdateRunPRURL(f.sctx.Run.ID, *f.sctx.Run.PRURL); err != nil {
+				t.Fatal(err)
+			}
+			switch mode {
+			case "advanced", "advanced-fork":
+				target := f.upstream
+				if mode == "advanced-fork" {
+					target = filepath.Join(t.TempDir(), "fork.git")
+					gitCmd(t, f.dir, "clone", "--bare", f.upstream, target)
+					f.sctx.Repo.ForkURL = target
+				}
+				gitCmd(t, f.dir, "commit", "--allow-empty", "-m", "external advance")
+				gitCmd(t, f.dir, "push", target, "HEAD:refs/heads/feature")
+				gitCmd(t, f.dir, "reset", "--hard", f.headSHA)
+			case "missing":
+				gitCmd(t, f.upstream, "update-ref", "-d", "refs/heads/feature")
+			case "unreadable":
+				gitCmd(t, f.dir, "remote", "set-url", "origin", filepath.Join(t.TempDir(), "missing.git"))
+			}
+			t.Setenv("NM_HOME", t.TempDir())
+			p, err := paths.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := p.EnsureDirs(); err != nil {
+				t.Fatal(err)
+			}
+			step := &latePublicationAdmissionStep{env: fakeCIGH(t, "OPEN", `[]`), started: make(chan struct{})}
+			executor := pipeline.NewExecutor(f.sctx.DB, p, f.sctx.Config, f.sctx.Agent, []pipeline.Step{step}, nil)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { done <- executor.Execute(ctx, f.sctx.Run, f.sctx.Repo, f.dir) }()
+			defer func() {
+				cancel()
+				select {
+				case <-done:
+				case <-time.After(5 * time.Second):
+					t.Error("refused monitor did not stop")
+				}
+			}()
+			select {
+			case <-step.started:
+			case <-ctx.Done():
+				t.Fatal("initial monitor did not start")
+			}
+			before, err := f.sctx.DB.GetRun(f.sctx.Run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			beforeSteps, err := f.sctx.DB.GetStepsByRun(f.sctx.Run.ID)
+			if err != nil || len(beforeSteps) != 1 {
+				t.Fatalf("monitor step missing: %v", err)
+			}
+			beforeRounds, err := f.sctx.DB.GetRoundsByStep(beforeSteps[0].ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if before.CIReadyAt == nil || before.ReviewApprovedHeadSHA == nil {
+				t.Fatal("fixture has no readiness or review authority to preserve")
+			}
+			err = executor.RespondToLateCIFinding(f.sctx.Run.ID, types.StepCI, types.ActionFix, nil, nil, []types.Finding{{ID: "late-1", Description: "new requirement"}}, "", f.headSHA)
+			if err == nil {
+				t.Fatal("stale/unreadable owned publication admitted")
+			}
+			if !strings.Contains(err.Error(), "publication") && !strings.Contains(err.Error(), "published head") {
+				t.Fatalf("admission refused for an unrelated reason: %v", err)
+			}
+			after, readErr := f.sctx.DB.GetRun(f.sctx.Run.ID)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			afterSteps, readErr := f.sctx.DB.GetStepsByRun(f.sctx.Run.ID)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			afterRounds, readErr := f.sctx.DB.GetRoundsByStep(beforeSteps[0].ID)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if !reflect.DeepEqual(before, after) || !reflect.DeepEqual(beforeSteps, afterSteps) || !reflect.DeepEqual(beforeRounds, afterRounds) || f.localHead(t) != f.headSHA || len(f.sctx.Agent.(*mockAgent).calls) != 0 {
+				t.Fatal("refused publication changed readiness, authority, gate, worktree or fixer")
 			}
 		})
 	}

@@ -1524,6 +1524,11 @@ func runAxiRespond(cmd *cobra.Command, ra respondArgs) error {
 				return emitError(cmd, 2, fmt.Sprintf("invalid --add-finding: %v", err),
 					`Expected a JSON object, e.g. {"description":"...","action":"auto-fix"}`)
 			}
+			if ra.head != "" {
+				if note := strings.TrimSpace(ra.instructions); note != "" {
+					f.UserInstructions = note
+				}
+			}
 			added = append(added, f)
 		}
 	}
