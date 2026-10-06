@@ -335,6 +335,7 @@ type ciFixTargets struct {
 	Findings      Findings
 	Checks        []scm.CheckTarget
 	MergeConflict bool
+	LateFinding   bool
 }
 
 func parseCIFixTargets(raw string) (ciFixTargets, error) {
@@ -348,6 +349,9 @@ func parseCIFixTargets(raw string) (ciFixTargets, error) {
 	targets := ciFixTargets{Findings: findings}
 	seen := map[string]bool{}
 	for _, item := range findings.Items {
+		if item.Category == types.FindingCategoryCILateFinding {
+			targets.LateFinding = true
+		}
 		if item.Category == types.FindingCategoryCIMergeConflict {
 			targets.MergeConflict = true
 		}

@@ -119,6 +119,9 @@ func (s *CIStep) repairFromFindings(sctx *pipeline.StepContext, host scm.Host, p
 		return ciRepairParkOutcome(targets.Findings, sctx.DeferredFindings, err.Error()), nil
 	}
 	if err != nil {
+		if targets.LateFinding {
+			return ciRepairParkOutcome(targets.Findings, sctx.DeferredFindings, err.Error()), nil
+		}
 		// An ordinary fix failure is cheap to repeat and often works the next
 		// time: the next settled observation re-emits the findings and the
 		// executor retries while auto_fix.ci allows.
@@ -156,6 +159,9 @@ func (s *CIStep) repairFromFindings(sctx *pipeline.StepContext, host scm.Host, p
 	if repair.NoCodeChangeNeeded {
 		sctx.Log(fmt.Sprintf("CI fixer concluded no code change is needed: %s", repair.Summary))
 		return ciRepairParkOutcome(targets.Findings, sctx.DeferredFindings, repair.Summary), nil
+	}
+	if targets.LateFinding {
+		return ciRepairParkOutcome(targets.Findings, sctx.DeferredFindings, "late finding remains unresolved; repair produced no changes"), nil
 	}
 	sctx.Log("CI fix produced no changes, resuming monitoring...")
 	return nil, nil

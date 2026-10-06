@@ -1250,7 +1250,10 @@ rounds:
 		var inserted *db.StepRound
 		var dbErr error
 		roundTrigger := nextTrigger
-		if stepName == types.StepReview {
+		if outcome.admittedRound != nil {
+			inserted = outcome.admittedRound
+			roundNum = inserted.Round
+		} else if stepName == types.StepReview {
 			if e.config != nil && e.config.CaptureEvalProvenance {
 				inserted, dbErr = e.db.InsertReviewStepRoundWithProvenance(sr.ID, roundNum, roundTrigger, findingsPtr, fixSummaryPtr, reviewApprovedHeadSHA, reviewStartingHeadSHA, e.config.TrustedConfigSHA, e.config.ReplayGlobalYAML, e.config.ReplayRepoYAML, roundDuration)
 			} else {

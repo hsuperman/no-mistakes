@@ -10,6 +10,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/testgit"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -125,6 +126,9 @@ func TestExecutorLateCIFindingJoinsMonitorAndRevalidatesSameRun(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			if err := ValidateRecoveredRun(database, during, executor.steps); err != nil {
+				t.Fatalf("admitted gate cannot survive daemon restart: %v", err)
+			}
 			if during.CIReadyAt != nil || during.ReviewApprovedHeadSHA != nil {
 				t.Fatal("admission retained readiness/approval")
 			}
@@ -185,5 +189,89 @@ func TestExecutorLateCIFindingJoinsMonitorAndRevalidatesSameRun(t *testing.T) {
 			}
 
 		})
+	}
+}
+
+func TestExecutorLateCIFindingRecoveredGateRequiresExplicitFix(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunPRURL(run.ID, "https://github.com/test/repo/pull/1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunPushBinding(run.ID, db.PushBinding{HeadSHA: run.HeadSHA, TargetKind: "origin", Ref: "refs/heads/feature"}); err != nil {
+		t.Fatal(err)
+	}
+	names := []types.StepName{types.StepReview, types.StepTest, types.StepDocument, types.StepLint, types.StepPush, types.StepPR, types.StepCI}
+	steps := make([]Step, 0, len(names))
+	ciCalls := 0
+	var ciID string
+	for _, name := range names {
+		result, err := database.InsertStepResult(run.ID, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := database.StartStep(result.ID); err != nil {
+			t.Fatal(err)
+		}
+		if name != types.StepCI {
+			if err := database.CompleteStep(result.ID, 0, 0, "historical.log"); err != nil {
+				t.Fatal(err)
+			}
+			steps = append(steps, newPassStep(name))
+			continue
+		}
+		ciID = result.ID
+		steps = append(steps, &adaptiveCallStep{name: types.StepCI, fn: func(sctx *StepContext) (*StepOutcome, error) {
+			ciCalls++
+			if ciCalls == 1 {
+				if !sctx.Fixing || !strings.Contains(sctx.PreviousFindings, "retained acceptance") {
+					return nil, fmt.Errorf("recovery lost amendment: fixing=%v selected=%s", sctx.Fixing, sctx.PreviousFindings)
+				}
+				return &StepOutcome{RestartFrom: types.StepReview}, nil
+			}
+			return &StepOutcome{}, nil
+		}})
+	}
+	raw := `{"findings":[{"id":"late-1","description":"retained acceptance","severity":"error","action":"ask-user","category":"ci-late-finding"}]}`
+	if err := database.AdmitLateCIFindings(run.ID, ciID, run.HeadSHA, raw); err != nil {
+		t.Fatal(err)
+	}
+	retained, err := database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parked := make(chan struct{}, 1)
+	executor := NewExecutor(database, p, &config.Config{}, nil, steps, func(event ipc.Event) {
+		if event.StepName != nil && *event.StepName == types.StepCI && event.Status != nil && *event.Status == string(types.StepStatusAwaitingApproval) {
+			parked <- struct{}{}
+		}
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	completed := make(chan error, 1)
+	go func() { completed <- executor.Resume(ctx, retained, repo, t.TempDir()) }()
+	select {
+	case <-parked:
+	case <-ctx.Done():
+		t.Fatal("recovered amendment not parked")
+	}
+	if ciCalls != 0 {
+		t.Fatal("recovery automatically evaluated the retained amendment")
+	}
+	if err := executor.Respond(types.StepCI, types.ActionFix, []string{"late-1"}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-completed:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-ctx.Done():
+		t.Fatal("recovery failed to resume")
+	}
+	if ciCalls != 2 {
+		t.Fatalf("CI calls=%d, want fix then post-validation monitor", ciCalls)
 	}
 }

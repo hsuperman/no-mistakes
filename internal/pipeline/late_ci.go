@@ -71,6 +71,7 @@ func (e *Executor) admitLateCIFinding(runID string, step types.StepName, action 
 	persisted := append([]types.Finding(nil), added...)
 	for i := range persisted {
 		persisted[i].Action = types.ActionAskUser
+		persisted[i].Category = types.FindingCategoryCILateFinding
 	}
 	raw, err := json.Marshal(types.Findings{Items: persisted})
 	if err != nil {
@@ -151,8 +152,16 @@ func (e *Executor) executeInterruptibleCI(step Step, sctx *StepContext, sr *db.S
 	if sctx.CIReadinessChanged != nil {
 		sctx.CIReadinessChanged(false, false)
 	}
+	rounds, readErr := e.db.GetRoundsByStep(sr.ID)
+	if readErr != nil || len(rounds) == 0 {
+		return nil, fmt.Errorf("late CI admission round unavailable: %v", readErr)
+	}
+	admittedRound := rounds[len(rounds)-1]
+	if admittedRound.FindingsJSON == nil || *admittedRound.FindingsJSON != monitor.findings {
+		return nil, fmt.Errorf("late CI admission round changed")
+	}
 	e.approvalCh <- *response
-	return &StepOutcome{NeedsApproval: true, Findings: monitor.findings}, nil
+	return &StepOutcome{NeedsApproval: true, Findings: monitor.findings, admittedRound: admittedRound}, nil
 }
 
 // finishLateCIHandoff acknowledges only after the original monitor returned

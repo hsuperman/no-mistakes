@@ -31,7 +31,8 @@ func (d *DB) AdmitLateCIFindings(runID, stepID, head, findings string) error {
 		return fmt.Errorf("late finding requires the exact active published CI head")
 	}
 	result, err = tx.Exec(`UPDATE step_results SET status = ?, findings_json = ?,
-  last_activity_at = ?, last_activity = ? WHERE id = ? AND run_id = ?
+  duration_ms = COALESCE(duration_ms, 0), agent_pid = NULL,
+	  last_activity_at = ?, last_activity = ? WHERE id = ? AND run_id = ?
   AND step_name = ? AND status = ?`, types.StepStatusAwaitingApproval, findings, ts,
 		"late CI finding admitted", stepID, runID, types.StepCI, types.StepStatusRunning)
 	if err != nil {
@@ -43,6 +44,15 @@ func (d *DB) AdmitLateCIFindings(runID, stepID, head, findings string) error {
 	}
 	if changed != 1 {
 		return fmt.Errorf("late finding requires a running CI step")
+	}
+	// Recovery requires a complete round matching the retained gate. Record it
+	// in this transaction, before cancellation can interrupt the live executor.
+	_, err = tx.Exec(`INSERT INTO step_rounds
+	 (id, step_result_id, round, trigger_type, findings_json, duration_ms, created_at)
+	 VALUES (?, ?, (SELECT COALESCE(MAX(round), 0) + 1 FROM step_rounds WHERE step_result_id = ?), 'initial', ?, 0, ?)`,
+		newID(), stepID, stepID, findings, ts)
+	if err != nil {
+		return fmt.Errorf("retain late finding round: %w", err)
 	}
 	return tx.Commit()
 }
