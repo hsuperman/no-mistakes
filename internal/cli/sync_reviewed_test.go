@@ -3,13 +3,13 @@ package cli
 import (
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/types"
+	toon "github.com/toon-format/toon-go"
 )
 
 func TestReviewedRecoveryCLIRequiresDisplayedDigestAndPreservesOriginalCaller(t *testing.T) {
@@ -52,8 +52,12 @@ func TestReviewedRecoveryCLIRequiresDisplayedDigestAndPreservesOriginalCaller(t 
 	if run.CustodyReturnedAt != nil {
 		t.Fatal("preview stamped custody")
 	}
-	matched := regexp.MustCompile(`consent_digest: ([a-f0-9]{64})`).FindStringSubmatch(out)
-	if len(matched) != 2 {
+	var preview struct {
+		Recovery struct {
+			Digest string `toon:"consent_digest"`
+		} `toon:"reviewed_recovery"`
+	}
+	if err := toon.UnmarshalString(out, &preview); err != nil || len(preview.Recovery.Digest) != 64 {
 		t.Fatalf("digest: %s", out)
 	}
 	bad := append(append([]string{}, args...), "--consent", strings.Repeat("0", 64))
@@ -63,7 +67,7 @@ func TestReviewedRecoveryCLIRequiresDisplayedDigestAndPreservesOriginalCaller(t 
 	if cliGit(t, f.local, "rev-parse", "HEAD") != f.submitted {
 		t.Fatal("bad digest moved caller")
 	}
-	apply := append(append([]string{}, args...), "--consent", matched[1])
+	apply := append(append([]string{}, args...), "--consent", preview.Recovery.Digest)
 	out, err = executeCmd(apply...)
 	if err != nil {
 		t.Fatalf("apply: %v %s", err, out)
