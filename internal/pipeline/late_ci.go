@@ -58,7 +58,7 @@ func (e *Executor) admitLateCIFinding(runID string, step types.StepName, action 
 	}
 	monitor := e.lateCI
 	if e.waiting || monitor == nil || monitor.response != nil || monitor.runID != runID {
-		return fmt.Errorf("late findings require an active CI monitoring round; inspect axi status")
+		return fmt.Errorf("late findings require an initial CI monitoring round outside a fix execution; inspect axi status")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

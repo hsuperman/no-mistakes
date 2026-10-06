@@ -72,6 +72,17 @@ func (s *CIStep) repairFromFindings(sctx *pipeline.StepContext, host scm.Host, p
 	if err != nil {
 		return nil, fmt.Errorf("parse CI fix targets: %w", err)
 	}
+	if targets.LateFinding {
+		// A PR may become terminal after admission or while a retained gate is
+		// recovered. Reuse the live lifecycle proof before calling the fixer.
+		resolved, lifecycleErr := s.ReconcileApprovalGate(sctx)
+		if lifecycleErr != nil {
+			return ciRepairParkOutcome(targets.Findings, sctx.DeferredFindings, lifecycleErr.Error()), nil
+		}
+		if resolved {
+			return &pipeline.StepOutcome{SkipRemaining: true}, nil
+		}
+	}
 	if targets.empty() {
 		sctx.Log("fix requested with no CI findings to repair, resuming monitoring...")
 		return nil, nil

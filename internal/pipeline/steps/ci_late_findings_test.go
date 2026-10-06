@@ -15,7 +15,7 @@ import (
 )
 
 func TestCIStepLateFindingRevalidatesEvenWhenOrdinaryRepairsPublish(t *testing.T) {
-	for _, mode := range []string{"repaired", "fix-error", "no-change", "no-code-needed"} {
+	for _, mode := range []string{"repaired", "fix-error", "no-change", "no-code-needed", "closed"} {
 		t.Run(mode, func(t *testing.T) {
 			dir, base, head := setupGitRepo(t)
 			ag := &mockAgent{name: "test", runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
@@ -39,7 +39,11 @@ func TestCIStepLateFindingRevalidatesEvenWhenOrdinaryRepairsPublish(t *testing.T
 			gitCmd(t, dir, "push", "origin", "feature")
 			prURL := "https://github.com/test/repo/pull/42"
 			sctx.Run.PRURL = &prURL
-			sctx.Env = fakeCIGH(t, "OPEN", `[{"name":"test","state":"SUCCESS","bucket":"pass"}]`)
+			state := "OPEN"
+			if mode == "closed" {
+				state = "CLOSED"
+			}
+			sctx.Env = fakeCIGH(t, state, `[{"name":"test","state":"SUCCESS","bucket":"pass"}]`)
 			if err := sctx.DB.UpdateRunStatus(sctx.Run.ID, types.RunRunning); err != nil {
 				t.Fatal(err)
 			}
@@ -67,6 +71,16 @@ func TestCIStepLateFindingRevalidatesEvenWhenOrdinaryRepairsPublish(t *testing.T
 			outcome, err := (&CIStep{}).Execute(sctx)
 			if err != nil {
 				t.Fatal(err)
+			}
+			if mode == "closed" {
+				if len(ag.calls) != 0 || !outcome.SkipRemaining || outcome.RestartFrom != "" {
+					t.Fatalf("closed PR entered fixer: outcome=%+v calls=%d", outcome, len(ag.calls))
+				}
+				persisted, _ := sctx.DB.GetRun(sctx.Run.ID)
+				if persisted.PRState == nil || *persisted.PRState != "closed" || persisted.Status != types.RunCompleted {
+					t.Fatalf("terminal lifecycle lost: %+v", persisted)
+				}
+				return
 			}
 			if mode != "repaired" {
 				if !outcome.NeedsApproval || !strings.Contains(outcome.Findings, "late-1") || !strings.Contains(outcome.Findings, "ci-late-finding") || outcome.RestartFrom != "" || len(ag.calls) != 1 {
