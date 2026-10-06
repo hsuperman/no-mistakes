@@ -357,3 +357,126 @@ func TestReviewedRecoveryRefusesOlderTerminalPushOwnership(t *testing.T) {
 		})
 	}
 }
+
+func TestReviewedRecoveryPreviewIncludesSuppressedGitlinkChanges(t *testing.T) {
+	t.Parallel()
+	f, request := newReviewedRecoveryFixture(t)
+	pipeline := filepath.Join(filepath.Dir(f.local), "pipeline")
+	mustRun(t, pipeline, "checkout", "--detach", f.submitted)
+	mustRun(t, pipeline, "update-index", "--add", "--cacheinfo", "160000,"+f.base+",module")
+	mustRun(t, pipeline, "commit", "-m", "submitted gitlink")
+	source := mustRun(t, pipeline, "rev-parse", "HEAD")
+	mustRun(t, pipeline, "push", "origin", "HEAD:refs/heads/gitlink-source")
+	mustRun(t, f.local, "fetch", f.gate, source)
+	mustRun(t, f.local, "reset", "--hard", source)
+	if err := f.db.UpdateRunPushBinding(f.run.ID, db.PushBinding{HeadSHA: source, TargetKind: "upstream", TargetFingerprint: TargetFingerprint(f.remote), Ref: "refs/heads/feature/recover"}); err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, pipeline, "checkout", "--detach", f.preserved)
+	mustRun(t, pipeline, "update-index", "--add", "--cacheinfo", "160000,"+f.submitted+",module")
+	mustRun(t, pipeline, "commit", "-m", "reviewed gitlink")
+	target := mustRun(t, pipeline, "rev-parse", "HEAD")
+	mustRun(t, pipeline, "push", "origin", "HEAD:refs/heads/feature/recover")
+	if err := f.db.UpdateRunStatusWithVerifiedHead(f.run.ID, types.RunFailed, target); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.UpdateRunReviewApprovedHeadSHA(f.run.ID, target); err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, f.gate, "update-ref", f.anchorRef(), target)
+	request.ExpectedLocalHead, request.ReviewedHead = source, target
+	baseline, err := f.service.PreviewReviewedRecovery(f.ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, f.gate, "config", "diff.ignoreSubmodules", "all")
+	mustRun(t, f.gate, "config", "diff.submodule", "log")
+	plan, err := f.service.PreviewReviewedRecovery(f.ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(plan.Diff, "-Subproject commit "+f.base) || !strings.Contains(plan.Diff, "+Subproject commit "+f.submitted) || plan.Diff != baseline.Diff || plan.Digest != baseline.Digest {
+		t.Fatalf("configuration changed complete gitlink proof: %q", plan.Diff)
+	}
+}
+
+func TestReviewedRecoveryRequiresEveryPreservedAnchorThroughStamping(t *testing.T) {
+	t.Parallel()
+	for _, stage := range []string{"before move", "after move"} {
+		for _, role := range []string{"reviewed", "local", "submitted", "published"} {
+			for _, mutation := range []string{"delete", "move", "symbolic"} {
+				t.Run(stage+"/"+role+"/"+mutation, func(t *testing.T) {
+					t.Parallel()
+					f, request := newReviewedRecoveryFixture(t)
+					plan, err := f.service.PreviewReviewedRecovery(f.ctx, request)
+					if err != nil {
+						t.Fatal(err)
+					}
+					refs := map[string]string{
+						"reviewed":  custody.RecoveryRef(f.run.ID),
+						"local":     custody.RecoveryLocalRef(f.run.ID),
+						"submitted": "refs/no-mistakes/recover-submitted/" + f.run.ID,
+						"published": "refs/no-mistakes/recover-published/" + f.run.ID,
+					}
+					mutate := func() {
+						ref := refs[role]
+						if !strings.Contains(mustRun(t, f.local, "show-ref"), ref) {
+							t.Fatal("race ran before preservation")
+						}
+						switch mutation {
+						case "delete":
+							mustRun(t, f.local, "update-ref", "-d", ref)
+						case "move":
+							mustRun(t, f.local, "update-ref", ref, f.base)
+						case "symbolic":
+							mustRun(t, f.local, "symbolic-ref", ref, "refs/heads/"+f.run.Branch)
+						}
+					}
+					wantHead := request.ExpectedLocalHead
+					if stage == "before move" {
+						f.service.beforeRecoverBranchMove = mutate
+					} else {
+						f.service.afterRecoverBranchMove = mutate
+						wantHead = request.ReviewedHead
+					}
+					got := f.service.AdoptReviewedRecovery(f.ctx, request, plan.Digest)
+					if got.Recovered || f.custodyReturned() || got.Local.Head != wantHead || got.Changed != (wantHead != request.ExpectedLocalHead) || mustRun(t, f.local, "rev-parse", "HEAD") != wantHead {
+						t.Fatalf("missing or changed preservation accepted: %#v", got)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestReviewedRecoveryFailedMaterializationReportsConcurrentHead(t *testing.T) {
+	t.Parallel()
+	f, request := newReviewedRecoveryFixture(t)
+	plan, err := f.service.PreviewReviewedRecovery(f.ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var concurrentHead string
+	f.service.afterRecoverBranchMove = func() {
+		mustWrite(t, filepath.Join(f.local, "file.txt"), "concurrent committed edit\n")
+		mustRun(t, f.local, "commit", "-am", "concurrent commit")
+		concurrentHead = mustRun(t, f.local, "rev-parse", "HEAD")
+		mustWrite(t, filepath.Join(f.local, "file.txt"), "concurrent uncommitted edit\n")
+	}
+	got := f.service.AdoptReviewedRecovery(f.ctx, request, plan.Digest)
+	if got.Recovered || f.custodyReturned() || !got.Changed || got.Local.Head != concurrentHead || got.Local.Clean || got.Safety != "blocked_recover_worktree_busy" || !strings.Contains(got.Error, "could not be restored") {
+		t.Fatalf("dishonest partial outcome: %#v", got)
+	}
+	if mustRun(t, f.local, "rev-parse", "HEAD") != concurrentHead {
+		t.Fatal("overwrote concurrent commit")
+	}
+	content, err := os.ReadFile(filepath.Join(f.local, "file.txt"))
+	if err != nil || string(content) != "concurrent uncommitted edit\n" {
+		t.Fatalf("overwrote concurrent work: %q %v", content, err)
+	}
+	for _, binding := range reviewedRecoveryAnchors(f.run, request.ExpectedLocalHead) {
+		if !exactRawCommitRef(f.ctx, f.local, binding.ref, binding.head) {
+			t.Fatalf("lost preservation anchor: %#v", binding)
+		}
+	}
+}

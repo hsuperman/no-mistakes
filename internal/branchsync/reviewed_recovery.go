@@ -137,7 +137,7 @@ func (s *Service) reviewedRecoveryPlan(ctx context.Context, request ReviewedReco
 	if err != nil {
 		return plan, err
 	}
-	diff, err := git.RunRaw(ctx, s.GateDir, "diff", "--no-ext-diff", "--no-textconv", "--binary", "--full-index", "--no-color", request.ExpectedLocalHead, request.ReviewedHead, "--")
+	diff, err := git.RunRaw(ctx, s.GateDir, "diff", "--no-ext-diff", "--no-textconv", "--ignore-submodules=none", "--submodule=short", "--binary", "--full-index", "--no-color", request.ExpectedLocalHead, request.ReviewedHead, "--")
 	if err != nil {
 		return plan, err
 	}
@@ -209,11 +209,21 @@ func (s *Service) AdoptReviewedRecovery(ctx context.Context, request ReviewedRec
 	if err != nil || run == nil {
 		return refuse(fmt.Errorf("the selected run is no longer readable"))
 	}
-	validate := func(local string) bool {
+	validate := func(local string, requireAnchors bool) bool {
 		fresh, err := s.reviewedRecoveryPlan(ctx, request, local)
-		return err == nil && fresh.Digest == consent
+		if err != nil || fresh.Digest != consent {
+			return false
+		}
+		if requireAnchors {
+			for _, anchor := range reviewedRecoveryAnchors(run, request.ExpectedLocalHead) {
+				if !exactRawCommitRef(ctx, s.workDir(), anchor.ref, anchor.head) {
+					return false
+				}
+			}
+		}
+		return true
 	}
-	if !validate(request.ExpectedLocalHead) {
+	if !validate(request.ExpectedLocalHead, false) {
 		return refuse(fmt.Errorf("the recovery evidence changed before preservation"))
 	}
 	for _, anchor := range reviewedRecoveryAnchors(run, request.ExpectedLocalHead) {
@@ -226,10 +236,10 @@ func (s *Service) AdoptReviewedRecovery(ctx context.Context, request ReviewedRec
 			return refuse(fmt.Errorf("could not preserve recovery evidence: %w", err))
 		}
 	}
-	return s.recoverMovePreserved(ctx, run, state, request.ReviewedHead, true, func() bool { return validate(request.ExpectedLocalHead) }, func() State {
+	result := s.recoverMovePreserved(ctx, run, state, request.ReviewedHead, true, func() bool { return validate(request.ExpectedLocalHead, true) }, func() State {
 		state, _, _ = s.inspect(ctx)
 		materializedChanged = state.Local.Head != initialHead
-		if !validate(request.ReviewedHead) {
+		if !validate(request.ReviewedHead, true) {
 			return refuse(fmt.Errorf("reviewed head materialized but evidence changed; preserved refs remain, custody was not returned"))
 		}
 		updated, err := s.DB.SetReviewedRunCustodyReturned(run)
@@ -240,4 +250,10 @@ func (s *Service) AdoptReviewedRecovery(ctx context.Context, request ReviewedRec
 		result.Changed, result.Recovered = materializedChanged, true
 		return result
 	})
+	if !result.Recovered {
+		fresh, _, _ := s.inspect(ctx)
+		result.Local = fresh.Local
+		result.Changed = fresh.Local.Head != initialHead
+	}
+	return result
 }

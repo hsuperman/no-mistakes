@@ -1298,7 +1298,7 @@ func (s *Service) recoverMovePreserved(ctx context.Context, run *db.Run, state S
 	if _, err := git.Run(ctx, wd, "read-tree", "-m", "-u", head, preserved); err != nil {
 		rolledBack := ""
 		if _, rollbackErr := git.Run(ctx, wd, "update-ref", branchRef, head, preserved); rollbackErr != nil {
-			rolledBack = fmt.Sprintf("; the branch could not be restored to %s and now points at %s; the pre-recovery head remains anchored at %s", head, preserved, localAnchor)
+			rolledBack = fmt.Sprintf("; the branch could not be restored to %s; the pre-recovery head remains anchored at %s", head, localAnchor)
 		}
 		blocked := blockedPlan(state, StatePipelineOwned, "blocked_recover_worktree_busy", fmt.Sprintf("the working tree changed while custody was being returned, so no file was overwritten%s; re-run the recovery once the working tree is settled", rolledBack))
 		blocked.NextAction = &NextAction{Code: "inspect_worktree", Command: "git status"}
