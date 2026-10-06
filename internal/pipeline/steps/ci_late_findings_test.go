@@ -16,14 +16,24 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 )
 
+// Keep process-heavy repair fixtures serial on macOS; elsewhere their isolated
+// Git repos, databases and per-command environments can share the test parallel
+// budget instead of extending the Windows shard's serial critical path.
 func TestCIStepLateFindingRevalidatesEvenWhenOrdinaryRepairsPublish(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Parallel()
+	}
 	for _, mode := range []string{"repaired", "fix-error", "no-change", "no-code-needed", "closed", "no-code-needed-with-files", "no-code-needed-with-commit", "empty-agent-commit"} {
 		t.Run(mode, func(t *testing.T) {
+			if runtime.GOOS != "darwin" {
+				t.Parallel()
+			}
 			dir, base, head := setupGitRepo(t)
 			ag := &mockAgent{name: "test", runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
 				if mode == "fix-error" {
@@ -147,8 +157,14 @@ func TestCIStepLateFindingRevalidatesEvenWhenOrdinaryRepairsPublish(t *testing.T
 }
 
 func TestLateCIAdmissionRequiresLiveOpenOwnedPR(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Parallel()
+	}
 	for _, state := range []string{"OPEN", "CLOSED", "MERGED", "UNKNOWN"} {
 		t.Run(state, func(t *testing.T) {
+			if runtime.GOOS != "darwin" {
+				t.Parallel()
+			}
 			dir, base, head := setupGitRepo(t)
 			sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{})
 			url := "https://github.com/test/repo/pull/42"
@@ -162,6 +178,9 @@ func TestLateCIAdmissionRequiresLiveOpenOwnedPR(t *testing.T) {
 }
 
 func TestTerminalOwnedPRNeverBindsReplacement(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Parallel()
+	}
 	for _, state := range []scm.PRState{scm.PRStateClosed, scm.PRStateMerged} {
 		for _, discovered := range []*scm.PR{nil, {Number: "99", URL: "https://github.com/test/repo/pull/99"}, {Number: "42", URL: "https://github.com/test/repo/pull/42"}} {
 			owned := "https://github.com/test/repo/pull/42"
@@ -240,8 +259,14 @@ func assertLateCIRequestParked(t *testing.T, outcome *pipeline.StepOutcome) {
 }
 
 func TestLateCIRepairRetainedProtectedRetry(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Parallel()
+	}
 	for _, mode := range []string{"retry", "empty-retained", "repeat-refusal", "closed", "merged", "unreadable", "credentials", "host"} {
 		t.Run(mode, func(t *testing.T) {
+			if runtime.GOOS != "darwin" {
+				t.Parallel()
+			}
 			ag := &mockAgent{name: "test", runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
 				if mode == "empty-retained" {
 					gitCmd(t, opts.CWD, "commit", "--allow-empty", "-m", "empty retained repair")
@@ -369,8 +394,14 @@ func TestLateCIRepairRetainedProtectedRetry(t *testing.T) {
 }
 
 func TestLateCIRepairAvailabilityFailureParksRequest(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Parallel()
+	}
 	for _, mode := range []string{"credentials", "host"} {
 		t.Run(mode, func(t *testing.T) {
+			if runtime.GOOS != "darwin" {
+				t.Parallel()
+			}
 			ag := &mockAgent{name: "test"}
 			f := newLateCIRepairFixture(t, ag)
 			if mode == "credentials" {
@@ -392,8 +423,14 @@ func TestLateCIRepairAvailabilityFailureParksRequest(t *testing.T) {
 }
 
 func TestLateCIRepairTimeoutRetainedCommitRevalidates(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Parallel()
+	}
 	for _, negative := range []bool{false, true} {
 		t.Run(fmt.Sprint("negative=", negative), func(t *testing.T) {
+			if runtime.GOOS != "darwin" {
+				t.Parallel()
+			}
 			calls := 0
 			ag := &mockAgent{name: "test", runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 				calls++
@@ -550,9 +587,15 @@ func TestLateCIAdmissionRefusesMovedOrUnreadableOwnedPublicationWithoutMutation(
 }
 
 func TestLateCIRetainedRepairMergeProofUsesPublishedHead(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Parallel()
+	}
 	for _, retention := range []string{"protected", "timeout"} {
 		for _, proofHead := range []string{"published", "unpublished"} {
 			t.Run(retention+"/"+proofHead, func(t *testing.T) {
+				if runtime.GOOS != "darwin" {
+					t.Parallel()
+				}
 				ag := &mockAgent{name: "test", runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 					if err := os.WriteFile(filepath.Join(opts.CWD, "retained.txt"), []byte("material repair"), 0o644); err != nil {
 						return nil, err
@@ -637,8 +680,14 @@ func TestLateCIRetainedRepairMergeProofUsesPublishedHead(t *testing.T) {
 }
 
 func TestLateCIUnavailablePublicationRefusesAfterValidationRestart(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Parallel()
+	}
 	for _, mode := range []string{"credentials", "host"} {
 		t.Run(mode, func(t *testing.T) {
+			if runtime.GOOS != "darwin" {
+				t.Parallel()
+			}
 			f := newLateCIRepairFixture(t, &mockAgent{name: "test"})
 			if err := os.WriteFile(filepath.Join(f.dir, "amendment.txt"), []byte("amended requirement"), 0o644); err != nil {
 				t.Fatal(err)
