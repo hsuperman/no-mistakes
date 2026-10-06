@@ -72,17 +72,6 @@ func (s *CIStep) repairFromFindings(sctx *pipeline.StepContext, host scm.Host, p
 	if err != nil {
 		return nil, fmt.Errorf("parse CI fix targets: %w", err)
 	}
-	if targets.LateFinding {
-		// A PR may become terminal after admission or while a retained gate is
-		// recovered. Reuse the live lifecycle proof before calling the fixer.
-		resolved, lifecycleErr := s.ReconcileApprovalGate(sctx)
-		if lifecycleErr != nil {
-			return ciRepairParkOutcome(targets.Findings, sctx.DeferredFindings, lifecycleErr.Error()), nil
-		}
-		if resolved {
-			return &pipeline.StepOutcome{SkipRemaining: true}, nil
-		}
-	}
 	if targets.empty() {
 		sctx.Log("fix requested with no CI findings to repair, resuming monitoring...")
 		return nil, nil
@@ -296,7 +285,7 @@ CI logs:
 	if conclusionErr != nil {
 		sctx.Log(fmt.Sprintf("warning: could not parse CI repair conclusion: %v", conclusionErr))
 	}
-if !mergeConflict && conclusion.CodeChangeNeeded != nil && !*conclusion.CodeChangeNeeded {
+	if (targets.LateFinding || !mergeConflict) && conclusion.CodeChangeNeeded != nil && !*conclusion.CodeChangeNeeded {
 		return ciRepairResult{NoCodeChangeNeeded: true, Summary: conclusion.Summary}, nil
 	}
 	repair, err := s.commitRepair(sctx, conclusion.Summary, result)
@@ -727,7 +716,14 @@ func (s *CIStep) recordRepair(sctx *pipeline.StepContext, headSHA string) (ciRep
 		return ciRepairResult{}, err
 	}
 	if targets.LateFinding {
-		before, err := stepGitRun(sctx, "rev-parse", sctx.Run.HeadSHA+"^{tree}")
+		run, err := sctx.DB.GetRun(sctx.Run.ID)
+		if err != nil {
+			return ciRepairResult{}, err
+		}
+		if run == nil || run.LastPushedSHA == nil || strings.TrimSpace(*run.LastPushedSHA) == "" {
+			return ciRepairResult{}, fmt.Errorf("late repair has no durable published head")
+		}
+		before, err := stepGitRun(sctx, "rev-parse", *run.LastPushedSHA+"^{tree}")
 		if err != nil {
 			return ciRepairResult{}, err
 		}
@@ -738,6 +734,7 @@ func (s *CIStep) recordRepair(sctx *pipeline.StepContext, headSHA string) (ciRep
 		if strings.TrimSpace(before) == strings.TrimSpace(after) {
 			return ciRepairResult{}, nil
 		}
+		return s.recordLocalRepair(sctx, headSHA)
 	}
 	if ciRevalidatesRepairs(sctx) {
 		return s.recordLocalRepair(sctx, headSHA)

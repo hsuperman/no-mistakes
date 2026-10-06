@@ -278,6 +278,24 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		}
 	}
 	retryRefusal := sctx.Fixing && pipeline.HasProtectedPathRefusal(refusalFindings)
+	retained := ciTerminalRepairOutcome(&pipeline.StepOutcome{Findings: sctx.PreviousFindings}, Findings{}, refusalFindings)
+	retained = ciTerminalRepairOutcome(retained, Findings{}, sctx.DeferredFindings)
+	targets, _ := parseCIFixTargets(retained.Findings)
+	lateRepair := sctx.Fixing && targets.LateFinding
+	if lateRepair && retryRefusal {
+		sctx.PreviousFindings = retained.Findings
+	}
+	defer func() {
+		if lateRepair && (err != nil || outcome != nil && outcome.Skipped) {
+			summary := "Late CI repair remains unresolved"
+			if err != nil {
+				summary += ": " + safeurl.RedactText(err.Error())
+			} else {
+				summary += ": " + safeurl.RedactText(outcome.SkipReason)
+			}
+			outcome, err = ciRepairParkOutcome(targets.Findings, "", summary), nil
+		}
+	}()
 	// A fix round repairs the findings the executor selected for it, unless
 	// this re-entry is the retry of a retained repair a protected-path refusal
 	// interrupted: that repair is finished first and nothing new is requested.
@@ -297,10 +315,10 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			return
 		}
 		if refusal := pipeline.ProtectedPathOutcome(err); refusal != nil {
-			outcome, err = refusal, nil
+			outcome, err = ciTerminalRepairOutcome(refusal, targets.Findings, ""), nil
 			return
 		}
-		findings, _ := types.ParseFindingsJSON(refusalFindings)
+		findings := targets.Findings
 		findings.Summary = "Retained CI repair could not finish; resolve the failure and retry with fix"
 		if err != nil {
 			findings.Summary += ": " + safeurl.RedactText(err.Error())
@@ -320,6 +338,16 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 	ctx := sctx.Ctx
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	if lateRepair {
+		resolved, lifecycleErr := s.ReconcileApprovalGate(sctx)
+		if lifecycleErr != nil {
+			return ciRepairParkOutcome(targets.Findings, "", lifecycleErr.Error()), nil
+		}
+		if resolved {
+			retryRefusal = false
+			return &pipeline.StepOutcome{SkipRemaining: true}, nil
+		}
 	}
 	provider := resolvedProvider(sctx)
 	host, skipReason := buildHost(sctx, provider)
@@ -368,7 +396,14 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		}
 		retryRefusal = false
 		if repair.Revalidate {
-			return &pipeline.StepOutcome{RestartFrom: types.StepReview}, nil
+			outcome := &pipeline.StepOutcome{RestartFrom: types.StepReview}
+			if lateRepair {
+				outcome.Findings = sctx.DeferredFindings
+			}
+			return outcome, nil
+		}
+		if lateRepair {
+			return ciRepairParkOutcome(targets.Findings, "", "late finding remains unresolved; retained repair produced no material changes"), nil
 		}
 	}
 	baseBranch := effectivePRBaseBranch(sctx)
