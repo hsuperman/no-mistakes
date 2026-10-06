@@ -20,6 +20,7 @@ type lateCIMonitor struct {
 	findings      string
 	done          chan error
 	invalidate    func()
+	verify        func(context.Context) error
 }
 
 // RespondToLateCIFinding is the exact-head-bound amendment path for an active
@@ -66,12 +67,21 @@ func (e *Executor) admitLateCIFinding(runID string, step types.StepName, action 
 	if err != nil || live != head {
 		return fmt.Errorf("late CI finding head does not match the managed worktree")
 	}
+	if monitor.verify == nil {
+		return fmt.Errorf("CI monitor cannot verify live PR lifecycle")
+	}
+	if err := monitor.verify(ctx); err != nil {
+		return err
+	}
 	// User findings are persisted as ask-user, preventing crash recovery from
 	// automatically applying an amendment whose response was interrupted.
 	persisted := append([]types.Finding(nil), added...)
 	for i := range persisted {
 		persisted[i].Action = types.ActionAskUser
 		persisted[i].Category = types.FindingCategoryCILateFinding
+		if note, ok := instructions[persisted[i].ID]; ok {
+			persisted[i].UserInstructions = note
+		}
 	}
 	raw, err := json.Marshal(types.Findings{Items: persisted})
 	if err != nil {
@@ -82,7 +92,7 @@ func (e *Executor) admitLateCIFinding(runID string, step types.StepName, action 
 		return err
 	}
 	monitor.findings = normalized
-	monitor.response = &approvalResponse{action: action, findingIDs: findingIDList(normalized), instructions: instructions}
+	monitor.response = &approvalResponse{action: action, findingIDs: findingIDList(normalized)}
 	if monitor.invalidate != nil {
 		monitor.invalidate()
 	}
@@ -97,6 +107,18 @@ func (e *Executor) executeInterruptibleCI(step Step, sctx *StepContext, sr *db.S
 	child, cancel := context.WithCancel(sctx.Ctx)
 	defer cancel()
 	monitor := &lateCIMonitor{runID: sctx.Run.ID, stepID: sr.ID, cancel: cancel, done: make(chan error, 1)}
+	if verifier, ok := step.(interface{ VerifyLateCIAdmission(*StepContext) error }); ok {
+		monitor.verify = func(ctx context.Context) error {
+			copyCtx := *sctx
+			copyCtx.Ctx = ctx
+			run, err := e.db.GetRun(monitor.runID)
+			if err != nil || run == nil {
+				return fmt.Errorf("read late CI admission run: %v", err)
+			}
+			copyCtx.Run = run
+			return verifier.VerifyLateCIAdmission(&copyCtx)
+		}
+	}
 	monitor.invalidate = func() {
 		if sctx.CIReadinessChanged != nil {
 			sctx.CIReadinessChanged(false, false)

@@ -2,6 +2,8 @@ package pipeline
 
 import (
 	"context"
+ "encoding/json"
+ "reflect"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -59,7 +61,7 @@ func TestExecutorLateCIFindingJoinsMonitorAndRevalidatesSameRun(t *testing.T) {
 					return &StepOutcome{}, nil
 				}}
 			}
-			ci := &adaptiveCallStep{name: types.StepCI, fn: func(sctx *StepContext) (*StepOutcome, error) {
+			ciStep := &adaptiveCallStep{name: types.StepCI, fn: func(sctx *StepContext) (*StepOutcome, error) {
 				ciCalls++
 				if ciCalls == 1 {
 					if err := database.SetRunCIReady(run.ID, true); err != nil {
@@ -83,7 +85,7 @@ func TestExecutorLateCIFindingJoinsMonitorAndRevalidatesSameRun(t *testing.T) {
 					return nil, sctx.Ctx.Err()
 				}
 				if ciCalls == 2 {
-					if !sctx.Fixing || !strings.Contains(sctx.PreviousFindings, "new acceptance condition") || sctx.DeferredFindings != "" {
+					if !sctx.Fixing || (!strings.Contains(sctx.PreviousFindings, "new acceptance condition") || !strings.Contains(sctx.PreviousFindings, "preserve parser behavior")) || sctx.DeferredFindings != "" {
 						return nil, fmt.Errorf("repair lost selected finding: fixing=%v selected=%s deferred=%s", sctx.Fixing, sctx.PreviousFindings, sctx.DeferredFindings)
 					}
 					persisted, err := database.GetRun(run.ID)
@@ -97,6 +99,7 @@ func TestExecutorLateCIFindingJoinsMonitorAndRevalidatesSameRun(t *testing.T) {
 				}
 				return &StepOutcome{}, nil
 			}}
+			ci := &lateAdmissionTestStep{adaptiveCallStep: ciStep}
 			cfg := &config.Config{}
 			executor := NewExecutor(database, p, cfg, nil, []Step{pass(types.StepReview), pass(types.StepTest), pass(types.StepDocument), pass(types.StepLint), pass(types.StepPush), pass(types.StepPR), ci}, nil)
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -113,9 +116,20 @@ func TestExecutorLateCIFindingJoinsMonitorAndRevalidatesSameRun(t *testing.T) {
 			if err := executor.RespondToLateCIFinding(run.ID, types.StepCI, types.ActionFix, nil, nil, finding, "", "stale"); err == nil {
 				t.Fatal("stale head admitted")
 			}
+			for _, state := range []string{"closed", "merged", "unavailable"} {
+				ci.refusal = state
+				if err := executor.RespondToLateCIFinding(run.ID, types.StepCI, types.ActionFix, nil, nil, finding, "", head); err == nil {
+					t.Fatalf("%s PR admitted", state)
+				}
+				after, _ := database.GetRun(run.ID)
+				if !reflect.DeepEqual(before, after) {
+					t.Fatal("refused admission mutated run")
+				}
+			}
+			ci.refusal = ""
 			response := make(chan error, 1)
 			go func() {
-				response <- executor.RespondToLateCIFinding(run.ID, types.StepCI, types.ActionFix, nil, nil, finding, "", head)
+				response <- executor.RespondToLateCIFinding(run.ID, types.StepCI, types.ActionFix, nil, map[string]string{"late-1": "preserve parser behavior"}, finding, "", head)
 			}()
 			select {
 			case <-cancelled:
@@ -128,6 +142,15 @@ func TestExecutorLateCIFindingJoinsMonitorAndRevalidatesSameRun(t *testing.T) {
 			}
 			if err := ValidateRecoveredRun(database, during, executor.steps); err != nil {
 				t.Fatalf("admitted gate cannot survive daemon restart: %v", err)
+			}
+			results, _ := database.GetStepsByRun(run.ID)
+			for _, result := range results {
+				if result.StepName != types.StepCI { continue }
+				rounds, _ := database.GetRoundsByStep(result.ID)
+				var retained types.Findings
+				if len(rounds) == 0 || rounds[len(rounds)-1].FindingsJSON == nil { t.Fatal("missing durable finding") }
+				if err := json.Unmarshal([]byte(*rounds[len(rounds)-1].FindingsJSON), &retained); err != nil { t.Fatal(err) }
+				if len(retained.Items) != 1 || retained.Items[0].UserInstructions != "preserve parser behavior" { t.Fatalf("instructions lost: %+v", retained) }
 			}
 			if during.CIReadyAt != nil || during.ReviewApprovedHeadSHA != nil {
 				t.Fatal("admission retained readiness/approval")
@@ -226,7 +249,7 @@ func TestExecutorLateCIFindingRecoveredGateRequiresExplicitFix(t *testing.T) {
 		steps = append(steps, &adaptiveCallStep{name: types.StepCI, fn: func(sctx *StepContext) (*StepOutcome, error) {
 			ciCalls++
 			if ciCalls == 1 {
-				if !sctx.Fixing || !strings.Contains(sctx.PreviousFindings, "retained acceptance") {
+				if !sctx.Fixing || !strings.Contains(sctx.PreviousFindings, "retained acceptance") || !strings.Contains(sctx.PreviousFindings, "retained guidance") {
 					return nil, fmt.Errorf("recovery lost amendment: fixing=%v selected=%s", sctx.Fixing, sctx.PreviousFindings)
 				}
 				return &StepOutcome{RestartFrom: types.StepReview}, nil
@@ -234,7 +257,7 @@ func TestExecutorLateCIFindingRecoveredGateRequiresExplicitFix(t *testing.T) {
 			return &StepOutcome{}, nil
 		}})
 	}
-	raw := `{"findings":[{"id":"late-1","description":"retained acceptance","severity":"error","action":"ask-user","category":"ci-late-finding"}]}`
+	raw := `{"findings":[{"id":"late-1","description":"retained acceptance","severity":"error","action":"ask-user","category":"ci-late-finding","user_instructions":"retained guidance"}]}`
 	if err := database.AdmitLateCIFindings(run.ID, ciID, run.HeadSHA, raw); err != nil {
 		t.Fatal(err)
 	}
@@ -274,4 +297,14 @@ func TestExecutorLateCIFindingRecoveredGateRequiresExplicitFix(t *testing.T) {
 	if ciCalls != 2 {
 		t.Fatalf("CI calls=%d, want fix then post-validation monitor", ciCalls)
 	}
+}
+
+type lateAdmissionTestStep struct {
+	*adaptiveCallStep
+	refusal string
+}
+
+func (s *lateAdmissionTestStep) VerifyLateCIAdmission(*StepContext) error {
+	if s.refusal != "" { return fmt.Errorf("owned PR: %s", s.refusal) }
+	return nil
 }

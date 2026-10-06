@@ -8,6 +8,8 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/types"
+ "github.com/kunchenguid/no-mistakes/internal/scm"
+ "github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,7 +17,7 @@ import (
 )
 
 func TestCIStepLateFindingRevalidatesEvenWhenOrdinaryRepairsPublish(t *testing.T) {
-	for _, mode := range []string{"repaired", "fix-error", "no-change", "no-code-needed", "closed"} {
+	for _, mode := range []string{"repaired", "fix-error", "no-change", "no-code-needed", "closed", "no-code-needed-with-files", "empty-agent-commit"} {
 		t.Run(mode, func(t *testing.T) {
 			dir, base, head := setupGitRepo(t)
 			ag := &mockAgent{name: "test", runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
@@ -29,8 +31,15 @@ func TestCIStepLateFindingRevalidatesEvenWhenOrdinaryRepairsPublish(t *testing.T
 					return &agent.Result{Output: json.RawMessage(`{"summary":"no code needed","code_change_needed":false}`)}, nil
 				}
 
+				if mode == "empty-agent-commit" {
+					gitCmd(t, opts.CWD, "commit", "--allow-empty", "-m", "empty repair")
+					return &agent.Result{Output: json.RawMessage(`{"summary":"empty repair","code_change_needed":true}`)}, nil
+				}
 				if err := os.WriteFile(filepath.Join(opts.CWD, "late-fix.txt"), []byte("new requirement\n"), 0o644); err != nil {
 					return nil, err
+				}
+				if mode == "no-code-needed-with-files" {
+					return &agent.Result{Output: json.RawMessage(`{"summary":"declined repair despite edits","code_change_needed":false}`)}, nil
 				}
 				return &agent.Result{Output: json.RawMessage(`{"summary":"apply new requirement","code_change_needed":true}`)}, nil
 			}}
@@ -112,6 +121,43 @@ func TestCIStepLateFindingRevalidatesEvenWhenOrdinaryRepairsPublish(t *testing.T
 				t.Fatal("repair regained old authority or changed publication binding")
 			}
 
+			for _, terminal := range []string{"CLOSED", "MERGED"} {
+				recordReviewApproval(t, sctx, sctx.Run.HeadSHA)
+				sctx.Fixing = false
+				sctx.Env = fakeCIGH(t, terminal, `[]`)
+				if _, err := (&PushStep{}).Execute(sctx); err == nil {
+					t.Fatalf("published amended head after PR became %s", terminal)
+				}
+				if got := gitCmd(t, dir, "rev-parse", "origin/feature"); got != before {
+					t.Fatal("terminal PR allowed publication")
+				}
+			}
 		})
+	}
+}
+
+func TestLateCIAdmissionRequiresLiveOpenOwnedPR(t *testing.T) {
+	for _, state := range []string{"OPEN", "CLOSED", "MERGED", "UNKNOWN"} {
+		t.Run(state, func(t *testing.T) {
+			dir, base, head := setupGitRepo(t)
+			sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{})
+			url := "https://github.com/test/repo/pull/42"
+			sctx.Run.PRURL = &url
+			sctx.Env = fakeCIGH(t, state, `[]`)
+			if err := (&CIStep{}).VerifyLateCIAdmission(sctx); (err == nil) != (state == "OPEN") {
+				t.Fatalf("state=%s admission=%v", state, err)
+			}
+		})
+	}
+}
+
+func TestTerminalOwnedPRNeverBindsReplacement(t *testing.T) {
+	for _, state := range []scm.PRState{scm.PRStateClosed, scm.PRStateMerged} {
+		for _, discovered := range []*scm.PR{nil, {Number: "99", URL: "https://github.com/test/repo/pull/99"}, {Number: "42", URL: "https://github.com/test/repo/pull/42"}} {
+			owned := "https://github.com/test/repo/pull/42"
+			sctx := &pipeline.StepContext{Run: &db.Run{PRURL: &owned}}
+			pr, err := bindExistingPR(sctx, &recordingRetargetHost{state: state}, discovered)
+			if err == nil || pr != nil { t.Fatalf("terminal owned PR selected replacement: %v %v", pr, err) }
+		}
 	}
 }

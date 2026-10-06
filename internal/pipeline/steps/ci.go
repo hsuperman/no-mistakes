@@ -102,6 +102,28 @@ func (s *CIStep) TransientRerunRecorded(name string) bool {
 
 func (s *CIStep) Name() types.StepName { return types.StepCI }
 
+func (s *CIStep) VerifyLateCIAdmission(sctx *pipeline.StepContext) error {
+	host, reason := buildHost(sctx, resolvedProvider(sctx))
+	if host == nil {
+		return fmt.Errorf("cannot check PR state: %s", reason)
+	}
+	if err := host.Available(sctx.Ctx); err != nil {
+		return err
+	}
+	owned := runPRURL(sctx)
+	if owned == "" {
+		return fmt.Errorf("run has no PR URL")
+	}
+	state, err := host.GetPRState(sctx.Ctx, prFromOwnedURL(owned))
+	if err != nil {
+		return err
+	}
+	if state != scm.PRStateOpen {
+		return fmt.Errorf("owned PR is not open: %s", state)
+	}
+	return nil
+}
+
 // ReconcileApprovalGate re-checks the PR after the CI step has parked at an
 // approval gate. A PR can be merged or closed after a timeout/failure gate was
 // recorded; either terminal state supersedes the stale gate just as it does in

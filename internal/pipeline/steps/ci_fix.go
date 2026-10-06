@@ -296,6 +296,9 @@ CI logs:
 	if conclusionErr != nil {
 		sctx.Log(fmt.Sprintf("warning: could not parse CI repair conclusion: %v", conclusionErr))
 	}
+if !mergeConflict && conclusion.CodeChangeNeeded != nil && !*conclusion.CodeChangeNeeded {
+		return ciRepairResult{NoCodeChangeNeeded: true, Summary: conclusion.Summary}, nil
+	}
 	repair, err := s.commitRepair(sctx, conclusion.Summary, result)
 	var refusal *pipeline.ProtectedPathError
 	if errors.As(err, &refusal) {
@@ -311,10 +314,6 @@ CI logs:
 	if repair.HeadAdvanced {
 		repair.Summary = conclusion.Summary
 		return repair, nil
-	}
-	if !mergeConflict && conclusion.CodeChangeNeeded != nil && !*conclusion.CodeChangeNeeded {
-		repair.NoCodeChangeNeeded = true
-		repair.Summary = conclusion.Summary
 	}
 	return repair, nil
 }
@@ -723,6 +722,23 @@ func ciRepairPolicyDescription(sctx *pipeline.StepContext) string {
 // the two paths differ in whether the repair is published now or held until
 // Review has approved it.
 func (s *CIStep) recordRepair(sctx *pipeline.StepContext, headSHA string) (ciRepairResult, error) {
+	targets, err := parseCIFixTargets(sctx.PreviousFindings)
+	if err != nil {
+		return ciRepairResult{}, err
+	}
+	if targets.LateFinding {
+		before, err := stepGitRun(sctx, "rev-parse", sctx.Run.HeadSHA+"^{tree}")
+		if err != nil {
+			return ciRepairResult{}, err
+		}
+		after, err := stepGitRun(sctx, "rev-parse", headSHA+"^{tree}")
+		if err != nil {
+			return ciRepairResult{}, err
+		}
+		if strings.TrimSpace(before) == strings.TrimSpace(after) {
+			return ciRepairResult{}, nil
+		}
+	}
 	if ciRevalidatesRepairs(sctx) {
 		return s.recordLocalRepair(sctx, headSHA)
 	}
@@ -852,13 +868,16 @@ func attestHeadBeforePush(sctx *pipeline.StepContext, headSHA string, steps []*d
 	}
 	host, reason := buildHost(sctx, provider)
 	if host == nil {
+		if runPRURL(sctx) != "" {
+			return fmt.Errorf("%w: cannot verify owned PR: %s", errAttestationWriteFailed, reason)
+		}
 		if sctx.Log != nil && strings.TrimSpace(reason) != "" {
 			sctx.Log(fmt.Sprintf("skipping attestation write: %s", reason))
 		}
 		return nil
 	}
 	if err := host.Available(sctx.Ctx); err != nil {
-		if pluginContractBroken(err) {
+		if pluginContractBroken(err) || runPRURL(sctx) != "" {
 			return fmt.Errorf("%w: %w", errAttestationWriteFailed, err)
 		}
 		if sctx.Log != nil {
