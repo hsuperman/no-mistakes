@@ -54,8 +54,8 @@ func (s *Service) reviewedRecoveryPlan(ctx context.Context, request ReviewedReco
 	if request.RunID == "" || !exactCommitID(request.ExpectedLocalHead) || !exactCommitID(request.ReviewedHead) {
 		return plan, fmt.Errorf("an exact run, caller commit and reviewed commit are required")
 	}
-	state, run, _ := s.inspect(ctx)
-	if run == nil || run.ID != request.RunID || run.RepoID != s.Repo.ID || !terminalRunStatus(run.Status) || run.PushActive || pushStepRunning(s.DB, run.ID) || run.CustodyReturnedAt != nil || run.TerminalHeadVerifiedAt == nil || run.ReviewApprovedHeadSHA == nil || *run.ReviewApprovedHeadSHA != request.ReviewedHead || run.HeadSHA != request.ReviewedHead {
+	state, run, err := s.observeReviewedRecovery(ctx, request.RunID)
+	if err != nil || run == nil || run.ID != request.RunID || run.RepoID != s.Repo.ID || !terminalRunStatus(run.Status) || run.PushActive || pushStepRunning(s.DB, run.ID) || run.CustodyReturnedAt != nil || run.TerminalHeadVerifiedAt == nil || run.ReviewApprovedHeadSHA == nil || *run.ReviewApprovedHeadSHA != request.ReviewedHead || run.HeadSHA != request.ReviewedHead {
 		return plan, fmt.Errorf("the selected lane does not have this exact verified terminal review binding")
 	}
 	active, err := s.DB.GetActiveRun(s.Repo.ID, run.Branch)
@@ -154,6 +154,44 @@ func (s *Service) reviewedRecoveryPlan(ctx context.Context, request ReviewedReco
 	return plan, nil
 }
 
+func (s *Service) observeReviewedRecovery(ctx context.Context, runID string) (State, *db.Run, error) {
+	state := State{State: StateAmbiguousContext, Relation: RelationUnknown, Safety: "blocked_ambiguous_context", Remote: RemoteState{Freshness: "unknown"}}
+	state.Local.Head, _ = git.HeadSHA(ctx, s.workDir())
+	state.Local.Branch, _ = git.CurrentBranch(ctx, s.workDir())
+	state.Local.Clean, state.Local.Reason = worktreeClean(ctx, s.workDir())
+	root, err := git.FindGitRoot(s.workDir())
+	if err != nil {
+		return state, nil, err
+	}
+	mainRoot, err := git.FindMainRepoRoot(root)
+	if err != nil || !samePath(mainRoot, s.Repo.WorkingPath) {
+		return state, nil, fmt.Errorf("the invoking worktree does not belong to the registered repository")
+	}
+	if state.Local.Head == "" || state.Local.Branch == "" || state.Local.Branch == "HEAD" {
+		return state, nil, fmt.Errorf("reviewed recovery requires an exact checked-out branch and HEAD")
+	}
+	run, err := s.DB.GetRun(runID)
+	if err != nil || run == nil {
+		return state, nil, fmt.Errorf("the selected run could not be read")
+	}
+	if run.RepoID != s.Repo.ID || run.Branch != state.Local.Branch {
+		return state, nil, fmt.Errorf("the selected run does not belong to the caller's repository and branch")
+	}
+	state.State, state.Safety = StatePipelineOwned, "blocked_pipeline_owned"
+	state.Pipeline = PipelineState{
+		RunID: run.ID, Status: string(run.Status), SubmittedHead: ptr(run.SubmittedHeadSHA), CurrentHead: run.HeadSHA,
+		PushedHead: ptr(run.LastPushedSHA), PushedAt: value(run.LastPushedAt), PushGeneration: value(run.PushGeneration),
+	}
+	state.PRState = normalizePRState(run.PRState)
+	state.Target = TargetState{Kind: ptr(run.PushTargetKind), URL: displayTarget(s.Repo.PushURL()), Ref: ptr(run.PushRef)}
+	state.Target.Remote = s.remoteName(ctx)
+	state.Remote = RemoteState{ObservedHead: ptr(run.LastPushedSHA), Freshness: "pipeline_push", ObservedAt: value(run.LastPushedAt)}
+	if run.CustodyReturnedAt != nil {
+		s.classifyCustodyReturned(ctx, &state)
+	}
+	return state, run, nil
+}
+
 func exactRawCommitRef(ctx context.Context, dir, ref, head string) bool {
 	if symbolic, err := git.Run(ctx, dir, "symbolic-ref", "-q", ref); err == nil && symbolic != "" {
 		return false
@@ -190,7 +228,7 @@ func recoveryRefCompatible(ctx context.Context, dir, ref, head string) (bool, er
 // AdoptReviewedRecovery is an explicit operator choice, never a weakened
 // ordinary Recover containment proof. No push, rerun or validation is implied.
 func (s *Service) AdoptReviewedRecovery(ctx context.Context, request ReviewedRecoveryRequest, consent string) State {
-	state, run, _ := s.inspect(ctx)
+	state, run, _ := s.observeReviewedRecovery(ctx, request.RunID)
 	initialHead := state.Local.Head
 	materializedChanged := false
 	refuse := func(err error) State {
@@ -237,7 +275,7 @@ func (s *Service) AdoptReviewedRecovery(ctx context.Context, request ReviewedRec
 		}
 	}
 	result := s.recoverMovePreserved(ctx, run, state, request.ReviewedHead, true, func() bool { return validate(request.ExpectedLocalHead, true) }, func() State {
-		state, _, _ = s.inspect(ctx)
+		state, _, _ = s.observeReviewedRecovery(ctx, request.RunID)
 		materializedChanged = state.Local.Head != initialHead
 		if !validate(request.ReviewedHead, true) {
 			return refuse(fmt.Errorf("reviewed head materialized but evidence changed; preserved refs remain, custody was not returned"))
@@ -246,7 +284,7 @@ func (s *Service) AdoptReviewedRecovery(ctx context.Context, request ReviewedRec
 		if err != nil || !updated {
 			return refuse(fmt.Errorf("reviewed head materialized but conditional custody stamp refused; preserved refs remain, inspect before retrying"))
 		}
-		result, _, _ := s.inspect(ctx)
+		result, _, _ := s.observeReviewedRecovery(ctx, request.RunID)
 		result.Changed, result.Recovered = materializedChanged, true
 		return result
 	})

@@ -1,8 +1,11 @@
 package branchsync
 
 import (
+	"crypto/sha256"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -514,4 +517,88 @@ func TestReviewedRecoveryFailedMaterializationReportsConcurrentHead(t *testing.T
 			t.Fatalf("lost preservation anchor: %#v", binding)
 		}
 	}
+}
+
+func TestReviewedRecoveryConflictingPreviewAndWrongConsentLeaveObjectsAndRefsUnchanged(t *testing.T) {
+	t.Parallel()
+	f := newRecoverFixture(t, types.RunFailed)
+	if err := f.db.UpdateRunPushBinding(f.run.ID, db.PushBinding{HeadSHA: f.preserved, TargetKind: "upstream", TargetFingerprint: TargetFingerprint(f.remote), Ref: "refs/heads/feature/recover"}); err != nil {
+		t.Fatal(err)
+	}
+	pipeline := filepath.Join(filepath.Dir(f.local), "pipeline")
+	mustRun(t, pipeline, "checkout", "-B", "reviewed-rewrite", f.base)
+	mustWrite(t, filepath.Join(pipeline, "file.txt"), "independently reviewed replacement\n")
+	mustRun(t, pipeline, "commit", "-am", "reviewed rewrite")
+	reviewed := mustRun(t, pipeline, "rev-parse", "HEAD")
+	mustRun(t, pipeline, "push", "--force", "origin", "HEAD:refs/heads/feature/recover")
+	if err := f.db.UpdateRunStatusWithVerifiedHead(f.run.ID, types.RunFailed, reviewed); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.UpdateRunReviewApprovedHeadSHA(f.run.ID, reviewed); err != nil {
+		t.Fatal(err)
+	}
+	if err := custody.PreserveRecoveryHead(f.ctx, f.gate, f.run.ID, reviewed); err != nil {
+		t.Fatal(err)
+	}
+	request := ReviewedRecoveryRequest{RunID: f.run.ID, ExpectedLocalHead: f.submitted, ReviewedHead: reviewed}
+	inventory := func(dir string) map[string][32]byte {
+		t.Helper()
+		objects := mustRun(t, dir, "rev-parse", "--path-format=absolute", "--git-path", "objects")
+		files := make(map[string][32]byte)
+		err := filepath.WalkDir(objects, func(path string, entry fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if entry.IsDir() {
+				return nil
+			}
+			content, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			relative, err := filepath.Rel(objects, path)
+			if err != nil {
+				return err
+			}
+			files[relative] = sha256.Sum256(content)
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return files
+	}
+	type snapshot struct {
+		objects map[string][32]byte
+		refs    string
+	}
+	before := make(map[string]snapshot)
+	for _, dir := range []string{f.local, f.gate} {
+		mustRun(t, dir, "gc")
+		before[dir] = snapshot{inventory(dir), mustRun(t, dir, "show-ref")}
+	}
+	assertUnchanged := func() {
+		t.Helper()
+		for dir, previous := range before {
+			if !reflect.DeepEqual(inventory(dir), previous.objects) {
+				t.Fatalf("read-only operation changed loose or packed objects in %s", dir)
+			}
+			if mustRun(t, dir, "show-ref") != previous.refs {
+				t.Fatalf("read-only operation changed refs in %s", dir)
+			}
+		}
+		if mustRun(t, f.local, "rev-parse", "HEAD") != f.submitted || f.custodyReturned() {
+			t.Fatal("read-only operation moved HEAD or returned custody")
+		}
+	}
+	plan, err := f.service.PreviewReviewedRecovery(f.ctx, request)
+	if err != nil || plan.Digest == "" || !strings.Contains(plan.Diff, "independently reviewed replacement") {
+		t.Fatalf("conflicting rewrite preview: %#v, %v", plan, err)
+	}
+	assertUnchanged()
+	result := f.service.AdoptReviewedRecovery(f.ctx, request, strings.Repeat("0", 64))
+	if result.Recovered || result.Changed || result.Local.Head != f.submitted || !strings.Contains(result.Error, "consent") {
+		t.Fatalf("wrong-consent receipt: %#v", result)
+	}
+	assertUnchanged()
 }
