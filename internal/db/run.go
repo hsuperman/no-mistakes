@@ -634,9 +634,12 @@ func (d *DB) SetReviewedRunCustodyReturned(expected *Run) (bool, error) {
 		AND status IN ('completed', 'failed', 'cancelled', 'ci_monitor_interrupted') AND push_active = 0
 		AND review_approved_head_sha = ? AND terminal_head_verified_at = ?
 		AND submitted_head_sha IS ? AND last_pushed_sha IS ? AND custody_returned_at IS NULL
+		AND NOT EXISTS (SELECT 1 FROM step_results busy JOIN runs owner ON owner.id = busy.run_id
+		 WHERE owner.repo_id = runs.repo_id AND owner.branch = runs.branch
+		 AND busy.step_name = 'push' AND busy.status IN ('running', 'fixing'))
 		AND NOT EXISTS (SELECT 1 FROM runs other WHERE other.repo_id = runs.repo_id
 		 AND other.branch = runs.branch AND other.id != runs.id
-		 AND (other.status IN ('pending', 'running') OR other.id > runs.id))`,
+		 AND (other.status IN ('pending', 'running') OR other.push_active = 1 OR other.id > runs.id))`,
 		ts, ts, expected.ID, expected.RepoID, expected.Branch, expected.HeadSHA, expected.Status,
 		*expected.ReviewApprovedHeadSHA, *expected.TerminalHeadVerifiedAt, expected.SubmittedHeadSHA, expected.LastPushedSHA)
 	if err != nil {

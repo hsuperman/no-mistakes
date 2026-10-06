@@ -67,8 +67,8 @@ func (s *Service) reviewedRecoveryPlan(ctx context.Context, request ReviewedReco
 		return plan, err
 	}
 	for _, other := range runs {
-		if other.Branch == run.Branch && other.ID > run.ID {
-			return plan, fmt.Errorf("a newer run owns the selected lane")
+		if other.Branch == run.Branch && (other.ID > run.ID || other.PushActive || pushStepRunning(s.DB, other.ID)) {
+			return plan, fmt.Errorf("a newer run or an unsettled push owns the selected lane")
 		}
 	}
 	registered, err := s.DB.GetRepo(s.Repo.ID)

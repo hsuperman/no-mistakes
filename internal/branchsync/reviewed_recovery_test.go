@@ -277,3 +277,59 @@ func TestReviewedRecoveryRejectsOversizedProofInsteadOfTruncatingConsent(t *test
 		t.Fatal("oversized proof mutated caller")
 	}
 }
+
+func TestReviewedRecoveryRefusesOlderTerminalPushOwnership(t *testing.T) {
+	t.Parallel()
+	for _, kind := range []string{"flag", "running", "fixing"} {
+		t.Run(kind, func(t *testing.T) {
+			f, request := newReviewedRecoveryFixture(t)
+			older := f.run.ID
+			latest, err := f.db.InsertRun(f.repo.ID, f.run.Branch, f.submitted, f.base)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := f.db.UpdateRunStatusWithVerifiedHead(latest.ID, types.RunFailed, f.preserved); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.db.UpdateRunReviewApprovedHeadSHA(latest.ID, f.preserved); err != nil {
+				t.Fatal(err)
+			}
+			if err := custody.PreserveRecoveryHead(f.ctx, f.gate, latest.ID, f.preserved); err != nil {
+				t.Fatal(err)
+			}
+			request.RunID = latest.ID
+			plan, err := f.service.PreviewReviewedRecovery(f.ctx, request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if kind == "flag" {
+				if err := f.db.SetRunPushActive(older, true); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				step, err := f.db.InsertStepResult(older, types.StepPush)
+				if err != nil {
+					t.Fatal(err)
+				}
+				status := types.StepStatusRunning
+				if kind == "fixing" {
+					status = types.StepStatusFixing
+				}
+				if err := f.db.UpdateStepStatus(step.ID, status); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := f.service.PreviewReviewedRecovery(f.ctx, request); err == nil {
+				t.Fatal("older unsettled push offered preview")
+			}
+			got := f.service.AdoptReviewedRecovery(f.ctx, request, plan.Digest)
+			latest, err = f.db.GetRun(latest.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Recovered || latest.CustodyReturnedAt != nil || mustRun(t, f.local, "rev-parse", "HEAD") != f.submitted {
+				t.Fatalf("unsettled push adopted: %#v", got)
+			}
+		})
+	}
+}
